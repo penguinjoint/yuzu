@@ -6,17 +6,20 @@
 
 #include <memory>
 
+#include "core/hle/kernel/memory/memory_block.h"
 #include "core/hle/kernel/object.h"
 #include "core/hle/kernel/physical_memory.h"
 
 union ResultCode;
 
+namespace Core::Memory {
+class Memory;
+}
+
 namespace Kernel {
 
 class KernelCore;
 class Process;
-
-enum class MemoryPermission : u32;
 
 /// Defines the interface for transfer memory objects.
 ///
@@ -26,13 +29,14 @@ enum class MemoryPermission : u32;
 ///
 class TransferMemory final : public Object {
 public:
-    explicit TransferMemory(KernelCore& kernel);
+    explicit TransferMemory(KernelCore& kernel, Core::Memory::Memory& memory);
     ~TransferMemory() override;
 
     static constexpr HandleType HANDLE_TYPE = HandleType::TransferMemory;
 
-    static std::shared_ptr<TransferMemory> Create(KernelCore& kernel, VAddr base_address, u64 size,
-                                                  MemoryPermission permissions);
+    static std::shared_ptr<TransferMemory> Create(KernelCore& kernel, Core::Memory::Memory& memory,
+                                                  VAddr base_address, std::size_t size,
+                                                  Memory::MemoryPermission permissions);
 
     TransferMemory(const TransferMemory&) = delete;
     TransferMemory& operator=(const TransferMemory&) = delete;
@@ -56,48 +60,32 @@ public:
     const u8* GetPointer() const;
 
     /// Gets the size of the memory backing this instance in bytes.
-    u64 GetSize() const;
+    constexpr std::size_t GetSize() const {
+        return size;
+    }
 
-    /// Attempts to map transfer memory with the given range and memory permissions.
-    ///
-    /// @param address     The base address to being mapping memory at.
-    /// @param size        The size of the memory to map, in bytes.
-    /// @param permissions The memory permissions to check against when mapping memory.
-    ///
-    /// @pre The given address, size, and memory permissions must all match
-    ///      the same values that were given when creating the transfer memory
-    ///      instance.
-    ///
-    ResultCode MapMemory(VAddr address, u64 size, MemoryPermission permissions);
+    /// Reserves the region to be used for the transfer memory, called after the transfer memory is
+    /// created.
+    ResultCode Reserve();
 
-    /// Unmaps the transfer memory with the given range
-    ///
-    /// @param address The base address to begin unmapping memory at.
-    /// @param size    The size of the memory to unmap, in bytes.
-    ///
-    /// @pre The given address and size must be the same as the ones used
-    ///      to create the transfer memory instance.
-    ///
-    ResultCode UnmapMemory(VAddr address, u64 size);
+    /// Resets the region previously used for the transfer memory, called after the transfer memory
+    /// is closed.
+    ResultCode Reset();
 
 private:
-    /// Memory block backing this instance.
-    std::shared_ptr<PhysicalMemory> backing_block;
-
     /// The base address for the memory managed by this instance.
-    VAddr base_address = 0;
+    VAddr base_address{};
 
     /// Size of the memory, in bytes, that this instance manages.
-    u64 memory_size = 0;
+    std::size_t size{};
 
     /// The memory permissions that are applied to this instance.
-    MemoryPermission owner_permissions{};
+    Memory::MemoryPermission owner_permissions{};
 
     /// The process that this transfer memory instance was created under.
-    Process* owner_process = nullptr;
+    Process* owner_process{};
 
-    /// Whether or not this transfer memory instance has mapped memory.
-    bool is_mapped = false;
+    Core::Memory::Memory& memory;
 };
 
 } // namespace Kernel

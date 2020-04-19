@@ -10,8 +10,8 @@
 #include "common/file_util.h"
 #include "common/logging/log.h"
 #include "core/hle/kernel/code_set.h"
+#include "core/hle/kernel/memory/page_table.h"
 #include "core/hle/kernel/process.h"
-#include "core/hle/kernel/vm_manager.h"
 #include "core/loader/elf.h"
 #include "core/memory.h"
 
@@ -335,7 +335,8 @@ Kernel::CodeSet ElfReader::LoadInto(VAddr vaddr) {
             codeset_segment->addr = segment_addr;
             codeset_segment->size = aligned_size;
 
-            memcpy(&program_image[current_image_position], GetSegmentPtr(i), p->p_filesz);
+            std::memcpy(program_image.data() + current_image_position, GetSegmentPtr(i),
+                        p->p_filesz);
             current_image_position += aligned_size;
         }
     }
@@ -392,7 +393,7 @@ AppLoader_ELF::LoadResult AppLoader_ELF::Load(Kernel::Process& process) {
         return {ResultStatus::ErrorIncorrectELFFileSize, {}};
     }
 
-    const VAddr base_address = process.VMManager().GetCodeRegionBaseAddress();
+    const VAddr base_address = process.PageTable().GetCodeRegionStart();
     ElfReader elf_reader(&buffer[0]);
     Kernel::CodeSet codeset = elf_reader.LoadInto(base_address);
     const VAddr entry_point = codeset.entrypoint;
@@ -400,7 +401,7 @@ AppLoader_ELF::LoadResult AppLoader_ELF::Load(Kernel::Process& process) {
     process.LoadModule(std::move(codeset), entry_point);
 
     is_loaded = true;
-    return {ResultStatus::Success, LoadParameters{48, Memory::DEFAULT_STACK_SIZE}};
+    return {ResultStatus::Success, LoadParameters{48, Core::Memory::DEFAULT_STACK_SIZE}};
 }
 
 } // namespace Loader

@@ -11,6 +11,7 @@
 #include "common/logging/log.h"
 #include "video_core/engines/shader_bytecode.h"
 #include "video_core/shader/node_helper.h"
+#include "video_core/shader/registry.h"
 #include "video_core/shader/shader_ir.h"
 
 namespace VideoCommon::Shader {
@@ -24,9 +25,10 @@ using Tegra::Shader::PredOperation;
 using Tegra::Shader::Register;
 
 ShaderIR::ShaderIR(const ProgramCode& program_code, u32 main_offset, CompilerSettings settings,
-                   ConstBufferLocker& locker)
-    : program_code{program_code}, main_offset{main_offset}, settings{settings}, locker{locker} {
+                   Registry& registry)
+    : program_code{program_code}, main_offset{main_offset}, settings{settings}, registry{registry} {
     Decode();
+    PostDecode();
 }
 
 ShaderIR::~ShaderIR() = default;
@@ -36,6 +38,10 @@ Node ShaderIR::GetRegister(Register reg) {
         used_registers.insert(static_cast<u32>(reg));
     }
     return MakeNode<GprNode>(reg);
+}
+
+Node ShaderIR::GetCustomVariable(u32 id) {
+    return MakeNode<CustomVarNode>(id);
 }
 
 Node ShaderIR::GetImmediate19(Instruction instr) {
@@ -50,8 +56,7 @@ Node ShaderIR::GetConstBuffer(u64 index_, u64 offset_) {
     const auto index = static_cast<u32>(index_);
     const auto offset = static_cast<u32>(offset_);
 
-    const auto [entry, is_new] = used_cbufs.try_emplace(index);
-    entry->second.MarkAsUsed(offset);
+    used_cbufs.try_emplace(index).first->second.MarkAsUsed(offset);
 
     return MakeNode<CbufNode>(index, Immediate(offset));
 }
@@ -60,8 +65,7 @@ Node ShaderIR::GetConstBufferIndirect(u64 index_, u64 offset_, Node node) {
     const auto index = static_cast<u32>(index_);
     const auto offset = static_cast<u32>(offset_);
 
-    const auto [entry, is_new] = used_cbufs.try_emplace(index);
-    entry->second.MarkAsUsedIndirect();
+    used_cbufs.try_emplace(index).first->second.MarkAsUsedIndirect();
 
     Node final_offset = [&] {
         // Attempt to inline constant buffer without a variable offset. This is done to allow
@@ -90,6 +94,7 @@ Node ShaderIR::GetPredicate(bool immediate) {
 }
 
 Node ShaderIR::GetInputAttribute(Attribute::Index index, u64 element, Node buffer) {
+    MarkAttributeUsage(index, element);
     used_input_attributes.emplace(index);
     return MakeNode<AbufNode>(index, static_cast<u32>(element), std::move(buffer));
 }
@@ -100,42 +105,8 @@ Node ShaderIR::GetPhysicalInputAttribute(Tegra::Shader::Register physical_addres
 }
 
 Node ShaderIR::GetOutputAttribute(Attribute::Index index, u64 element, Node buffer) {
-    if (index == Attribute::Index::LayerViewportPointSize) {
-        switch (element) {
-        case 0:
-            UNIMPLEMENTED();
-            break;
-        case 1:
-            uses_layer = true;
-            break;
-        case 2:
-            uses_viewport_index = true;
-            break;
-        case 3:
-            uses_point_size = true;
-            break;
-        }
-    }
-    if (index == Attribute::Index::TessCoordInstanceIDVertexID) {
-        switch (element) {
-        case 2:
-            uses_instance_id = true;
-            break;
-        case 3:
-            uses_vertex_id = true;
-            break;
-        default:
-            break;
-        }
-    }
-    if (index == Attribute::Index::ClipDistances0123 ||
-        index == Attribute::Index::ClipDistances4567) {
-        const auto clip_index =
-            static_cast<u32>((index == Attribute::Index::ClipDistances4567 ? 1 : 0) + element);
-        used_clip_distances.at(clip_index) = true;
-    }
+    MarkAttributeUsage(index, element);
     used_output_attributes.insert(index);
-
     return MakeNode<AbufNode>(index, static_cast<u32>(element), std::move(buffer));
 }
 
@@ -193,6 +164,7 @@ Node ShaderIR::ConvertIntegerSize(Node value, Register::Size size, bool is_signe
                                 std::move(value), Immediate(16));
         value = SignedOperation(OperationCode::IArithmeticShiftRight, is_signed, NO_PRECISE,
                                 std::move(value), Immediate(16));
+        return value;
     case Register::Size::Word:
         // Default - do nothing
         return value;
@@ -386,6 +358,9 @@ Node ShaderIR::GetConditionCode(Tegra::Shader::ConditionCode cc) const {
     switch (cc) {
     case Tegra::Shader::ConditionCode::NEU:
         return GetInternalFlag(InternalFlag::Zero, true);
+    case Tegra::Shader::ConditionCode::FCSM_TR:
+        UNIMPLEMENTED_MSG("EXIT.FCSM_TR is not implemented");
+        return MakeNode<PredicateNode>(Pred::NeverExecute, false);
     default:
         UNIMPLEMENTED_MSG("Unimplemented condition code: {}", static_cast<u32>(cc));
         return MakeNode<PredicateNode>(Pred::NeverExecute, false);
@@ -444,6 +419,64 @@ Node ShaderIR::BitfieldExtract(Node value, u32 offset, u32 bits) {
 Node ShaderIR::BitfieldInsert(Node base, Node insert, u32 offset, u32 bits) {
     return Operation(OperationCode::UBitfieldInsert, NO_PRECISE, base, insert, Immediate(offset),
                      Immediate(bits));
+}
+
+void ShaderIR::MarkAttributeUsage(Attribute::Index index, u64 element) {
+    switch (index) {
+    case Attribute::Index::LayerViewportPointSize:
+        switch (element) {
+        case 0:
+            UNIMPLEMENTED();
+            break;
+        case 1:
+            uses_layer = true;
+            break;
+        case 2:
+            uses_viewport_index = true;
+            break;
+        case 3:
+            uses_point_size = true;
+            break;
+        }
+        break;
+    case Attribute::Index::TessCoordInstanceIDVertexID:
+        switch (element) {
+        case 2:
+            uses_instance_id = true;
+            break;
+        case 3:
+            uses_vertex_id = true;
+            break;
+        }
+        break;
+    case Attribute::Index::ClipDistances0123:
+    case Attribute::Index::ClipDistances4567: {
+        const u64 clip_index = (index == Attribute::Index::ClipDistances4567 ? 4 : 0) + element;
+        used_clip_distances.at(clip_index) = true;
+        break;
+    }
+    case Attribute::Index::FrontColor:
+    case Attribute::Index::FrontSecondaryColor:
+    case Attribute::Index::BackColor:
+    case Attribute::Index::BackSecondaryColor:
+        uses_legacy_varyings = true;
+        break;
+    default:
+        if (index >= Attribute::Index::TexCoord_0 && index <= Attribute::Index::TexCoord_7) {
+            uses_legacy_varyings = true;
+        }
+        break;
+    }
+}
+
+std::size_t ShaderIR::DeclareAmend(Node new_amend) {
+    const std::size_t id = amend_code.size();
+    amend_code.push_back(new_amend);
+    return id;
+}
+
+u32 ShaderIR::NewCustomVariable() {
+    return num_custom_variables++;
 }
 
 } // namespace VideoCommon::Shader

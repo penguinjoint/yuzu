@@ -14,15 +14,15 @@
 #include "common/logging/log.h"
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
-#include "core/core_cpu.h"
 #include "core/core_timing.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/process.h"
 #include "core/hle/kernel/scheduler.h"
+#include "core/hle/kernel/time_manager.h"
 
 namespace Kernel {
 
-GlobalScheduler::GlobalScheduler(Core::System& system) : system{system} {}
+GlobalScheduler::GlobalScheduler(KernelCore& kernel) : kernel{kernel} {}
 
 GlobalScheduler::~GlobalScheduler() = default;
 
@@ -36,7 +36,7 @@ void GlobalScheduler::RemoveThread(std::shared_ptr<Thread> thread) {
 }
 
 void GlobalScheduler::UnloadThread(std::size_t core) {
-    Scheduler& sched = system.Scheduler(core);
+    Scheduler& sched = kernel.Scheduler(core);
     sched.UnloadThread();
 }
 
@@ -51,7 +51,7 @@ void GlobalScheduler::SelectThread(std::size_t core) {
         sched.is_context_switch_pending = sched.selected_thread != sched.current_thread;
         std::atomic_thread_fence(std::memory_order_seq_cst);
     };
-    Scheduler& sched = system.Scheduler(core);
+    Scheduler& sched = kernel.Scheduler(core);
     Thread* current_thread = nullptr;
     // Step 1: Get top thread in schedule queue.
     current_thread = scheduled_queue[core].empty() ? nullptr : scheduled_queue[core].front();
@@ -125,8 +125,8 @@ bool GlobalScheduler::YieldThreadAndBalanceLoad(Thread* yielding_thread) {
                "Thread yielding without being in front");
     scheduled_queue[core_id].yield(priority);
 
-    std::array<Thread*, NUM_CPU_CORES> current_threads;
-    for (u32 i = 0; i < NUM_CPU_CORES; i++) {
+    std::array<Thread*, Core::Hardware::NUM_CPU_CORES> current_threads;
+    for (std::size_t i = 0; i < current_threads.size(); i++) {
         current_threads[i] = scheduled_queue[i].empty() ? nullptr : scheduled_queue[i].front();
     }
 
@@ -178,8 +178,8 @@ bool GlobalScheduler::YieldThreadAndWaitForLoadBalancing(Thread* yielding_thread
     // function...
     if (scheduled_queue[core_id].empty()) {
         // Here, "current_threads" is calculated after the ""yield"", unlike yield -1
-        std::array<Thread*, NUM_CPU_CORES> current_threads;
-        for (u32 i = 0; i < NUM_CPU_CORES; i++) {
+        std::array<Thread*, Core::Hardware::NUM_CPU_CORES> current_threads;
+        for (std::size_t i = 0; i < current_threads.size(); i++) {
             current_threads[i] = scheduled_queue[i].empty() ? nullptr : scheduled_queue[i].front();
         }
         for (auto& thread : suggested_queue[core_id]) {
@@ -209,7 +209,7 @@ bool GlobalScheduler::YieldThreadAndWaitForLoadBalancing(Thread* yielding_thread
 }
 
 void GlobalScheduler::PreemptThreads() {
-    for (std::size_t core_id = 0; core_id < NUM_CPU_CORES; core_id++) {
+    for (std::size_t core_id = 0; core_id < Core::Hardware::NUM_CPU_CORES; core_id++) {
         const u32 priority = preemption_priorities[core_id];
 
         if (scheduled_queue[core_id].size(priority) > 0) {
@@ -350,15 +350,41 @@ bool GlobalScheduler::AskForReselectionOrMarkRedundant(Thread* current_thread,
 }
 
 void GlobalScheduler::Shutdown() {
-    for (std::size_t core = 0; core < NUM_CPU_CORES; core++) {
+    for (std::size_t core = 0; core < Core::Hardware::NUM_CPU_CORES; core++) {
         scheduled_queue[core].clear();
         suggested_queue[core].clear();
     }
     thread_list.clear();
 }
 
-Scheduler::Scheduler(Core::System& system, Core::ARM_Interface& cpu_core, std::size_t core_id)
-    : system(system), cpu_core(cpu_core), core_id(core_id) {}
+void GlobalScheduler::Lock() {
+    Core::EmuThreadHandle current_thread = kernel.GetCurrentEmuThreadID();
+    if (current_thread == current_owner) {
+        ++scope_lock;
+    } else {
+        inner_lock.lock();
+        current_owner = current_thread;
+        ASSERT(current_owner != Core::EmuThreadHandle::InvalidHandle());
+        scope_lock = 1;
+    }
+}
+
+void GlobalScheduler::Unlock() {
+    if (--scope_lock != 0) {
+        ASSERT(scope_lock > 0);
+        return;
+    }
+    for (std::size_t i = 0; i < Core::Hardware::NUM_CPU_CORES; i++) {
+        SelectThread(i);
+    }
+    current_owner = Core::EmuThreadHandle::InvalidHandle();
+    scope_lock = 1;
+    inner_lock.unlock();
+    // TODO(Blinkhawk): Setup the interrupts and change context on current core.
+}
+
+Scheduler::Scheduler(Core::System& system, std::size_t core_id)
+    : system{system}, core_id{core_id} {}
 
 Scheduler::~Scheduler() = default;
 
@@ -396,9 +422,10 @@ void Scheduler::UnloadThread() {
 
     // Save context for previous thread
     if (previous_thread) {
-        cpu_core.SaveContext(previous_thread->GetContext());
+        system.ArmInterface(core_id).SaveContext(previous_thread->GetContext32());
+        system.ArmInterface(core_id).SaveContext(previous_thread->GetContext64());
         // Save the TPIDR_EL0 system register in case it was modified.
-        previous_thread->SetTPIDR_EL0(cpu_core.GetTPIDR_EL0());
+        previous_thread->SetTPIDR_EL0(system.ArmInterface(core_id).GetTPIDR_EL0());
 
         if (previous_thread->GetStatus() == ThreadStatus::Running) {
             // This is only the case when a reschedule is triggered without the current thread
@@ -425,9 +452,10 @@ void Scheduler::SwitchContext() {
 
     // Save context for previous thread
     if (previous_thread) {
-        cpu_core.SaveContext(previous_thread->GetContext());
+        system.ArmInterface(core_id).SaveContext(previous_thread->GetContext32());
+        system.ArmInterface(core_id).SaveContext(previous_thread->GetContext64());
         // Save the TPIDR_EL0 system register in case it was modified.
-        previous_thread->SetTPIDR_EL0(cpu_core.GetTPIDR_EL0());
+        previous_thread->SetTPIDR_EL0(system.ArmInterface(core_id).GetTPIDR_EL0());
 
         if (previous_thread->GetStatus() == ThreadStatus::Running) {
             // This is only the case when a reschedule is triggered without the current thread
@@ -455,9 +483,10 @@ void Scheduler::SwitchContext() {
             system.Kernel().MakeCurrentProcess(thread_owner_process);
         }
 
-        cpu_core.LoadContext(new_thread->GetContext());
-        cpu_core.SetTlsAddress(new_thread->GetTLSAddress());
-        cpu_core.SetTPIDR_EL0(new_thread->GetTPIDR_EL0());
+        system.ArmInterface(core_id).LoadContext(new_thread->GetContext32());
+        system.ArmInterface(core_id).LoadContext(new_thread->GetContext64());
+        system.ArmInterface(core_id).SetTlsAddress(new_thread->GetTLSAddress());
+        system.ArmInterface(core_id).SetTPIDR_EL0(new_thread->GetTPIDR_EL0());
     } else {
         current_thread = nullptr;
         // Note: We do not reset the current process and current page table when idling because
@@ -484,6 +513,29 @@ void Scheduler::UpdateLastContextSwitchTime(Thread* thread, Process* process) {
 void Scheduler::Shutdown() {
     current_thread = nullptr;
     selected_thread = nullptr;
+}
+
+SchedulerLock::SchedulerLock(KernelCore& kernel) : kernel{kernel} {
+    kernel.GlobalScheduler().Lock();
+}
+
+SchedulerLock::~SchedulerLock() {
+    kernel.GlobalScheduler().Unlock();
+}
+
+SchedulerLockAndSleep::SchedulerLockAndSleep(KernelCore& kernel, Handle& event_handle,
+                                             Thread* time_task, s64 nanoseconds)
+    : SchedulerLock{kernel}, event_handle{event_handle}, time_task{time_task}, nanoseconds{
+                                                                                   nanoseconds} {
+    event_handle = InvalidHandle;
+}
+
+SchedulerLockAndSleep::~SchedulerLockAndSleep() {
+    if (sleep_cancelled) {
+        return;
+    }
+    auto& time_manager = kernel.TimeManager();
+    time_manager.ScheduleTimeEvent(event_handle, time_task, nanoseconds);
 }
 
 } // namespace Kernel

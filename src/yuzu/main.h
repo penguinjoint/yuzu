@@ -22,12 +22,12 @@ class Config;
 class EmuThread;
 class GameList;
 class GImageInfo;
-class GraphicsBreakPointsWidget;
 class GRenderWindow;
 class LoadingScreen;
 class MicroProfileDialog;
 class ProfilerWidget;
 class QLabel;
+class QPushButton;
 class WaitTreeWidget;
 enum class GameListOpenTarget;
 class GameListPlaceholder;
@@ -41,10 +41,6 @@ class ContentProvider;
 class ManualContentProvider;
 class VfsFilesystem;
 } // namespace FileSys
-
-namespace Tegra {
-class DebugContext;
-}
 
 enum class EmulatedDirectoryTarget {
     NAND,
@@ -81,6 +77,9 @@ public:
     ~GMainWindow() override;
 
     std::unique_ptr<DiscordRPC::DiscordInterface> discord_rpc;
+
+    bool DropAction(QDropEvent* event);
+    void AcceptDropEvent(QDropEvent* event);
 
 signals:
 
@@ -135,7 +134,6 @@ private:
     void PreventOSSleep();
     void AllowOSSleep();
 
-    QStringList GetUnsupportedGLExtensions();
     bool LoadROM(const QString& filename);
     void BootGame(const QString& filename);
     void ShutdownGame();
@@ -198,8 +196,6 @@ private slots:
     void OnMenuLoadFile();
     void OnMenuLoadFolder();
     void OnMenuInstallToNAND();
-    /// Called whenever a user select the "File->Select -- Directory" where -- is NAND or SD Card
-    void OnMenuSelectEmulatedDirectory(EmulatedDirectoryTarget target);
     void OnMenuRecentFile();
     void OnConfigure();
     void OnLoadAmiibo();
@@ -223,8 +219,6 @@ private:
 
     Ui::MainWindow ui;
 
-    std::shared_ptr<Tegra::DebugContext> debug_context;
-
     GRenderWindow* render_window;
     GameList* game_list;
     LoadingScreen* loading_screen;
@@ -236,6 +230,9 @@ private:
     QLabel* emu_speed_label = nullptr;
     QLabel* game_fps_label = nullptr;
     QLabel* emu_frametime_label = nullptr;
+    QPushButton* async_status_button = nullptr;
+    QPushButton* renderer_status_button = nullptr;
+    QPushButton* dock_status_button = nullptr;
     QTimer status_bar_update_timer;
 
     std::unique_ptr<Config> config;
@@ -255,7 +252,6 @@ private:
     // Debugger panes
     ProfilerWidget* profilerWidget;
     MicroProfileDialog* microProfileDialog;
-    GraphicsBreakPointsWidget* graphicsBreakpointsWidget;
     WaitTreeWidget* waitTreeWidget;
 
     QAction* actions_recent_files[max_recent_files_item];
@@ -269,8 +265,4 @@ protected:
     void dropEvent(QDropEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
-
-    // Overrides used to forward signals to the render window when the focus moves out.
-    void keyPressEvent(QKeyEvent* event) override;
-    void keyReleaseEvent(QKeyEvent* event) override;
 };

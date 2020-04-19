@@ -12,7 +12,7 @@
 
 namespace Kernel {
 
-ClientSession::ClientSession(KernelCore& kernel) : WaitObject{kernel} {}
+ClientSession::ClientSession(KernelCore& kernel) : SynchronizationObject{kernel} {}
 
 ClientSession::~ClientSession() {
     // This destructor will be called automatically when the last ClientSession handle is closed by
@@ -31,6 +31,11 @@ void ClientSession::Acquire(Thread* thread) {
     UNIMPLEMENTED();
 }
 
+bool ClientSession::IsSignaled() const {
+    UNIMPLEMENTED();
+    return true;
+}
+
 ResultVal<std::shared_ptr<ClientSession>> ClientSession::Create(KernelCore& kernel,
                                                                 std::shared_ptr<Session> parent,
                                                                 std::string name) {
@@ -42,7 +47,8 @@ ResultVal<std::shared_ptr<ClientSession>> ClientSession::Create(KernelCore& kern
     return MakeResult(std::move(client_session));
 }
 
-ResultCode ClientSession::SendSyncRequest(std::shared_ptr<Thread> thread, Memory::Memory& memory) {
+ResultCode ClientSession::SendSyncRequest(std::shared_ptr<Thread> thread,
+                                          Core::Memory::Memory& memory) {
     // Keep ServerSession alive until we're done working with it.
     if (!parent->Server()) {
         return ERR_SESSION_CLOSED_BY_REMOTE;

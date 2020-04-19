@@ -2,124 +2,174 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <tuple>
 
-#include "common/alignment.h"
 #include "common/assert.h"
-#include "core/memory.h"
-#include "video_core/memory_manager.h"
-#include "video_core/renderer_vulkan/declarations.h"
+#include "common/bit_util.h"
+#include "core/core.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
+#include "video_core/renderer_vulkan/vk_device.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_stream_buffer.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Vulkan {
 
-CachedBufferEntry::CachedBufferEntry(VAddr cpu_addr, std::size_t size, u64 offset,
-                                     std::size_t alignment, u8* host_ptr)
-    : RasterizerCacheObject{host_ptr}, cpu_addr{cpu_addr}, size{size}, offset{offset},
-      alignment{alignment} {}
+namespace {
 
-VKBufferCache::VKBufferCache(Tegra::MemoryManager& tegra_memory_manager,
-                             Memory::Memory& cpu_memory_,
-                             VideoCore::RasterizerInterface& rasterizer, const VKDevice& device,
-                             VKMemoryManager& memory_manager, VKScheduler& scheduler, u64 size)
-    : RasterizerCache{rasterizer}, tegra_memory_manager{tegra_memory_manager}, cpu_memory{
-                                                                                   cpu_memory_} {
-    const auto usage = vk::BufferUsageFlagBits::eVertexBuffer |
-                       vk::BufferUsageFlagBits::eIndexBuffer |
-                       vk::BufferUsageFlagBits::eUniformBuffer;
-    const auto access = vk::AccessFlagBits::eVertexAttributeRead | vk::AccessFlagBits::eIndexRead |
-                        vk::AccessFlagBits::eUniformRead;
-    stream_buffer =
-        std::make_unique<VKStreamBuffer>(device, memory_manager, scheduler, size, usage, access,
-                                         vk::PipelineStageFlagBits::eAllCommands);
-    buffer_handle = stream_buffer->GetBuffer();
+constexpr VkBufferUsageFlags BUFFER_USAGE =
+    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+constexpr VkPipelineStageFlags UPLOAD_PIPELINE_STAGE =
+    VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+constexpr VkAccessFlags UPLOAD_ACCESS_BARRIERS =
+    VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+    VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT;
+
+std::unique_ptr<VKStreamBuffer> CreateStreamBuffer(const VKDevice& device, VKScheduler& scheduler) {
+    return std::make_unique<VKStreamBuffer>(device, scheduler, BUFFER_USAGE);
 }
+
+} // Anonymous namespace
+
+CachedBufferBlock::CachedBufferBlock(const VKDevice& device, VKMemoryManager& memory_manager,
+                                     VAddr cpu_addr, std::size_t size)
+    : VideoCommon::BufferBlock{cpu_addr, size} {
+    VkBufferCreateInfo ci;
+    ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    ci.pNext = nullptr;
+    ci.flags = 0;
+    ci.size = static_cast<VkDeviceSize>(size);
+    ci.usage = BUFFER_USAGE | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.queueFamilyIndexCount = 0;
+    ci.pQueueFamilyIndices = nullptr;
+
+    buffer.handle = device.GetLogical().CreateBuffer(ci);
+    buffer.commit = memory_manager.Commit(buffer.handle, false);
+}
+
+CachedBufferBlock::~CachedBufferBlock() = default;
+
+VKBufferCache::VKBufferCache(VideoCore::RasterizerInterface& rasterizer, Core::System& system,
+                             const VKDevice& device, VKMemoryManager& memory_manager,
+                             VKScheduler& scheduler, VKStagingBufferPool& staging_pool)
+    : VideoCommon::BufferCache<Buffer, VkBuffer, VKStreamBuffer>{rasterizer, system,
+                                                                 CreateStreamBuffer(device,
+                                                                                    scheduler)},
+      device{device}, memory_manager{memory_manager}, scheduler{scheduler}, staging_pool{
+                                                                                staging_pool} {}
 
 VKBufferCache::~VKBufferCache() = default;
 
-u64 VKBufferCache::UploadMemory(GPUVAddr gpu_addr, std::size_t size, u64 alignment, bool cache) {
-    const auto cpu_addr{tegra_memory_manager.GpuToCpuAddress(gpu_addr)};
-    ASSERT_MSG(cpu_addr, "Invalid GPU address");
-
-    // Cache management is a big overhead, so only cache entries with a given size.
-    // TODO: Figure out which size is the best for given games.
-    cache &= size >= 2048;
-
-    u8* const host_ptr{cpu_memory.GetPointer(*cpu_addr)};
-    if (cache) {
-        const auto entry = TryGet(host_ptr);
-        if (entry) {
-            if (entry->GetSize() >= size && entry->GetAlignment() == alignment) {
-                return entry->GetOffset();
-            }
-            Unregister(entry);
-        }
-    }
-
-    AlignBuffer(alignment);
-    const u64 uploaded_offset = buffer_offset;
-
-    if (host_ptr == nullptr) {
-        return uploaded_offset;
-    }
-
-    std::memcpy(buffer_ptr, host_ptr, size);
-    buffer_ptr += size;
-    buffer_offset += size;
-
-    if (cache) {
-        auto entry = std::make_shared<CachedBufferEntry>(*cpu_addr, size, uploaded_offset,
-                                                         alignment, host_ptr);
-        Register(entry);
-    }
-
-    return uploaded_offset;
+Buffer VKBufferCache::CreateBlock(VAddr cpu_addr, std::size_t size) {
+    return std::make_shared<CachedBufferBlock>(device, memory_manager, cpu_addr, size);
 }
 
-u64 VKBufferCache::UploadHostMemory(const u8* raw_pointer, std::size_t size, u64 alignment) {
-    AlignBuffer(alignment);
-    std::memcpy(buffer_ptr, raw_pointer, size);
-    const u64 uploaded_offset = buffer_offset;
-
-    buffer_ptr += size;
-    buffer_offset += size;
-    return uploaded_offset;
+VkBuffer VKBufferCache::ToHandle(const Buffer& buffer) {
+    return buffer->GetHandle();
 }
 
-std::tuple<u8*, u64> VKBufferCache::ReserveMemory(std::size_t size, u64 alignment) {
-    AlignBuffer(alignment);
-    u8* const uploaded_ptr = buffer_ptr;
-    const u64 uploaded_offset = buffer_offset;
-
-    buffer_ptr += size;
-    buffer_offset += size;
-    return {uploaded_ptr, uploaded_offset};
+VkBuffer VKBufferCache::GetEmptyBuffer(std::size_t size) {
+    size = std::max(size, std::size_t(4));
+    const auto& empty = staging_pool.GetUnusedBuffer(size, false);
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([size, buffer = *empty.handle](vk::CommandBuffer cmdbuf) {
+        cmdbuf.FillBuffer(buffer, 0, size, 0);
+    });
+    return *empty.handle;
 }
 
-void VKBufferCache::Reserve(std::size_t max_size) {
-    bool invalidate;
-    std::tie(buffer_ptr, buffer_offset_base, invalidate) = stream_buffer->Reserve(max_size);
-    buffer_offset = buffer_offset_base;
+void VKBufferCache::UploadBlockData(const Buffer& buffer, std::size_t offset, std::size_t size,
+                                    const u8* data) {
+    const auto& staging = staging_pool.GetUnusedBuffer(size, true);
+    std::memcpy(staging.commit->Map(size), data, size);
 
-    if (invalidate) {
-        InvalidateAll();
-    }
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([staging = *staging.handle, buffer = buffer->GetHandle(), offset,
+                      size](vk::CommandBuffer cmdbuf) {
+        cmdbuf.CopyBuffer(staging, buffer, VkBufferCopy{0, offset, size});
+
+        VkBufferMemoryBarrier barrier;
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.pNext = nullptr;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = UPLOAD_ACCESS_BARRIERS;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = buffer;
+        barrier.offset = offset;
+        barrier.size = size;
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, UPLOAD_PIPELINE_STAGE, 0, {},
+                               barrier, {});
+    });
 }
 
-void VKBufferCache::Send() {
-    stream_buffer->Send(buffer_offset - buffer_offset_base);
+void VKBufferCache::DownloadBlockData(const Buffer& buffer, std::size_t offset, std::size_t size,
+                                      u8* data) {
+    const auto& staging = staging_pool.GetUnusedBuffer(size, true);
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([staging = *staging.handle, buffer = buffer->GetHandle(), offset,
+                      size](vk::CommandBuffer cmdbuf) {
+        VkBufferMemoryBarrier barrier;
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.pNext = nullptr;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = buffer;
+        barrier.offset = offset;
+        barrier.size = size;
+
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, {}, barrier, {});
+        cmdbuf.CopyBuffer(buffer, staging, VkBufferCopy{offset, 0, size});
+    });
+    scheduler.Finish();
+
+    std::memcpy(data, staging.commit->Map(size), size);
 }
 
-void VKBufferCache::AlignBuffer(std::size_t alignment) {
-    // Align the offset, not the mapped pointer
-    const u64 offset_aligned = Common::AlignUp(buffer_offset, alignment);
-    buffer_ptr += offset_aligned - buffer_offset;
-    buffer_offset = offset_aligned;
+void VKBufferCache::CopyBlock(const Buffer& src, const Buffer& dst, std::size_t src_offset,
+                              std::size_t dst_offset, std::size_t size) {
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([src_buffer = src->GetHandle(), dst_buffer = dst->GetHandle(), src_offset,
+                      dst_offset, size](vk::CommandBuffer cmdbuf) {
+        cmdbuf.CopyBuffer(src_buffer, dst_buffer, VkBufferCopy{src_offset, dst_offset, size});
+
+        std::array<VkBufferMemoryBarrier, 2> barriers;
+        barriers[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barriers[0].pNext = nullptr;
+        barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barriers[0].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[0].buffer = src_buffer;
+        barriers[0].offset = src_offset;
+        barriers[0].size = size;
+        barriers[1].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barriers[1].pNext = nullptr;
+        barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barriers[1].dstAccessMask = UPLOAD_ACCESS_BARRIERS;
+        barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[1].buffer = dst_buffer;
+        barriers[1].offset = dst_offset;
+        barriers[1].size = size;
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, UPLOAD_PIPELINE_STAGE, 0, {},
+                               barriers, {});
+    });
 }
 
 } // namespace Vulkan

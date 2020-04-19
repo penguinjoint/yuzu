@@ -53,7 +53,11 @@ if (MSVC)
 else()
     add_compile_options(
         -Wall
+        -Werror=implicit-fallthrough
+        -Werror=reorder
+        -Wextra
         -Wno-attributes
+        -Wno-unused-parameter
     )
 
     if (APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL Clang)
@@ -76,6 +80,15 @@ else()
             add_definitions(-DQT_STATICPLUGIN)
             add_compile_options("-static")
         endif()
+    endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR MINGW)
+        # GNU ar: Create thin archive files.
+        # Requires binutils-2.19 or later.
+        set(CMAKE_C_ARCHIVE_CREATE   "<CMAKE_AR> qcTP <TARGET> <LINK_FLAGS> <OBJECTS>")
+        set(CMAKE_C_ARCHIVE_APPEND   "<CMAKE_AR> qTP  <TARGET> <LINK_FLAGS> <OBJECTS>")
+        set(CMAKE_CXX_ARCHIVE_CREATE "<CMAKE_AR> qcTP <TARGET> <LINK_FLAGS> <OBJECTS>")
+        set(CMAKE_CXX_ARCHIVE_APPEND "<CMAKE_AR> qTP  <TARGET> <LINK_FLAGS> <OBJECTS>")
     endif()
 endif()
 

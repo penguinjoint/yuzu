@@ -97,6 +97,11 @@ public:
     void WriteBlockUnsafe(GPUVAddr dest_addr, const void* src_buffer, std::size_t size);
     void CopyBlockUnsafe(GPUVAddr dest_addr, GPUVAddr src_addr, std::size_t size);
 
+    /**
+     * IsGranularRange checks if a gpu region can be simply read with a pointer
+     */
+    bool IsGranularRange(GPUVAddr gpu_addr, std::size_t size);
+
 private:
     using VMAMap = std::map<GPUVAddr, VirtualMemoryArea>;
     using VMAHandle = VMAMap::const_iterator;
@@ -174,7 +179,7 @@ private:
     /// End of address space, based on address space in bits.
     static constexpr GPUVAddr address_space_end{1ULL << address_space_width};
 
-    Common::PageTable page_table{page_bits};
+    Common::PageTable page_table;
     VMAMap vma_map;
     VideoCore::RasterizerInterface& rasterizer;
 

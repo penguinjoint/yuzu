@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -24,8 +25,11 @@ inline u8* FromCacheAddr(CacheAddr cache_addr) {
 }
 
 namespace Core {
-class System;
+namespace Frontend {
+class EmuWindow;
 }
+class System;
+} // namespace Core
 
 namespace VideoCore {
 class RendererBase;
@@ -38,6 +42,7 @@ enum class RenderTargetFormat : u32 {
     RGBA32_FLOAT = 0xC0,
     RGBA32_UINT = 0xC2,
     RGBA16_UNORM = 0xC6,
+    RGBA16_SNORM = 0xC7,
     RGBA16_UINT = 0xC9,
     RGBA16_FLOAT = 0xCA,
     RG32_FLOAT = 0xCB,
@@ -56,6 +61,7 @@ enum class RenderTargetFormat : u32 {
     RG16_UINT = 0xDD,
     RG16_FLOAT = 0xDE,
     R11G11B10_FLOAT = 0xE0,
+    R32_SINT = 0xE3,
     R32_UINT = 0xE4,
     R32_FLOAT = 0xE5,
     B5G6R5_UNORM = 0xE8,
@@ -80,12 +86,6 @@ enum class DepthFormat : u32 {
     Z24_C8_UNORM = 0x18,
     Z32_S8_X24_FLOAT = 0x19,
 };
-
-/// Returns the number of bytes per pixel of each rendertarget format.
-u32 RenderTargetBytesPerPixel(RenderTargetFormat format);
-
-/// Returns the number of bytes per pixel of each depth format.
-u32 DepthFormatBytesPerPixel(DepthFormat format);
 
 struct CommandListHeader;
 class DebugContext;
@@ -132,7 +132,8 @@ class MemoryManager;
 
 class GPU {
 public:
-    explicit GPU(Core::System& system, VideoCore::RendererBase& renderer, bool is_async);
+    explicit GPU(Core::System& system, std::unique_ptr<VideoCore::RendererBase>&& renderer,
+                 bool is_async);
 
     virtual ~GPU();
 
@@ -177,11 +178,19 @@ public:
     /// Returns a reference to the GPU DMA pusher.
     Tegra::DmaPusher& DmaPusher();
 
+    VideoCore::RendererBase& Renderer() {
+        return *renderer;
+    }
+
+    const VideoCore::RendererBase& Renderer() const {
+        return *renderer;
+    }
+
     // Waits for the GPU to finish working
     virtual void WaitIdle() const = 0;
 
     /// Allows the CPU/NvFlinger to wait on the GPU before presenting a frame.
-    void WaitFence(u32 syncpoint_id, u32 value) const;
+    void WaitFence(u32 syncpoint_id, u32 value);
 
     void IncrementSyncPoint(u32 syncpoint_id);
 
@@ -190,6 +199,8 @@ public:
     void RegisterSyncptInterrupt(u32 syncpoint_id, u32 value);
 
     bool CancelSyncptInterrupt(u32 syncpoint_id, u32 value);
+
+    u64 GetTicks() const;
 
     std::unique_lock<std::mutex> LockSync() {
         return std::unique_lock{sync_mutex};
@@ -259,13 +270,13 @@ public:
     virtual void SwapBuffers(const Tegra::FramebufferConfig* framebuffer) = 0;
 
     /// Notify rasterizer that any caches of the specified region should be flushed to Switch memory
-    virtual void FlushRegion(CacheAddr addr, u64 size) = 0;
+    virtual void FlushRegion(VAddr addr, u64 size) = 0;
 
     /// Notify rasterizer that any caches of the specified region should be invalidated
-    virtual void InvalidateRegion(CacheAddr addr, u64 size) = 0;
+    virtual void InvalidateRegion(VAddr addr, u64 size) = 0;
 
     /// Notify rasterizer that any caches of the specified region should be flushed and invalidated
-    virtual void FlushAndInvalidateRegion(CacheAddr addr, u64 size) = 0;
+    virtual void FlushAndInvalidateRegion(VAddr addr, u64 size) = 0;
 
 protected:
     virtual void TriggerCpuInterrupt(u32 syncpoint_id, u32 value) const = 0;
@@ -288,7 +299,7 @@ private:
 protected:
     std::unique_ptr<Tegra::DmaPusher> dma_pusher;
     Core::System& system;
-    VideoCore::RendererBase& renderer;
+    std::unique_ptr<VideoCore::RendererBase> renderer;
 
 private:
     std::unique_ptr<Tegra::MemoryManager> memory_manager;
@@ -311,6 +322,8 @@ private:
     std::array<std::list<u32>, Service::Nvidia::MaxSyncPoints> syncpt_interrupts;
 
     std::mutex sync_mutex;
+
+    std::condition_variable sync_cv;
 
     const bool is_async;
 };

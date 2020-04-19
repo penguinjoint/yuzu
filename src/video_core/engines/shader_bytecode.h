@@ -82,6 +82,10 @@ union Attribute {
         Position = 7,
         Attribute_0 = 8,
         Attribute_31 = 39,
+        FrontColor = 40,
+        FrontSecondaryColor = 41,
+        BackColor = 42,
+        BackSecondaryColor = 43,
         ClipDistances0123 = 44,
         ClipDistances4567 = 45,
         PointCoord = 46,
@@ -89,6 +93,8 @@ union Attribute {
         // shader, and a tuple of (TessCoord.x, TessCoord.y, TessCoord.z, ~) when inside a Tess Eval
         // shader.
         TessCoordInstanceIDVertexID = 47,
+        TexCoord_0 = 48,
+        TexCoord_7 = 55,
         // This attribute contains a tuple of (Unk, Unk, Unk, gl_FrontFacing) when inside a fragment
         // shader. It is unknown what the other values contain.
         FrontFacing = 63,
@@ -215,6 +221,28 @@ enum class F2fRoundingOp : u64 {
     Trunc = 11,
 };
 
+enum class AtomicOp : u64 {
+    Add = 0,
+    Min = 1,
+    Max = 2,
+    Inc = 3,
+    Dec = 4,
+    And = 5,
+    Or = 6,
+    Xor = 7,
+    Exch = 8,
+    SafeAdd = 10,
+};
+
+enum class GlobalAtomicType : u64 {
+    U32 = 0,
+    S32 = 1,
+    U64 = 2,
+    F32_FTZ_RN = 3,
+    F16x2_FTZ_RN = 4,
+    S64 = 5,
+};
+
 enum class UniformType : u64 {
     UnsignedByte = 0,
     SignedByte = 1,
@@ -236,6 +264,13 @@ enum class StoreType : u64 {
     Bits128 = 6,
 };
 
+enum class AtomicType : u64 {
+    U32 = 0,
+    S32 = 1,
+    U64 = 2,
+    S64 = 3,
+};
+
 enum class IMinMaxExchange : u64 {
     None = 0,
     XLo = 1,
@@ -253,6 +288,23 @@ enum class VideoType : u64 {
 enum class VmadShr : u64 {
     Shr7 = 1,
     Shr15 = 2,
+};
+
+enum class VmnmxType : u64 {
+    Bits8,
+    Bits16,
+    Bits32,
+};
+
+enum class VmnmxOperation : u64 {
+    Mrg_16H = 0,
+    Mrg_16L = 1,
+    Mrg_8B0 = 2,
+    Mrg_8B2 = 3,
+    Acc = 4,
+    Min = 5,
+    Max = 6,
+    Nop = 7,
 };
 
 enum class XmadMode : u64 {
@@ -583,6 +635,19 @@ enum class ShuffleOperation : u64 {
     Bfly = 3, // shuffleXorNV
 };
 
+enum class ShfType : u64 {
+    Bits32 = 0,
+    U64 = 2,
+    S64 = 3,
+};
+
+enum class ShfXmode : u64 {
+    None = 0,
+    HI = 1,
+    X = 2,
+    XHI = 3,
+};
+
 union Instruction {
     constexpr Instruction& operator=(const Instruction& instr) {
         value = instr.value;
@@ -735,6 +800,13 @@ union Instruction {
     } shr;
 
     union {
+        BitField<37, 2, ShfType> type;
+        BitField<48, 2, ShfXmode> xmode;
+        BitField<50, 1, u64> wrap;
+        BitField<20, 6, u64> immediate;
+    } shf;
+
+    union {
         BitField<39, 5, u64> shift_amount;
         BitField<48, 1, u64> negate_b;
         BitField<49, 1, u64> negate_a;
@@ -850,14 +922,9 @@ union Instruction {
     } fadd32i;
 
     union {
-        BitField<20, 8, u64> shift_position;
-        BitField<28, 8, u64> shift_length;
-        BitField<48, 1, u64> negate_b;
-        BitField<49, 1, u64> negate_a;
-
-        u64 GetLeftShiftValue() const {
-            return 32 - (shift_position + shift_length);
-        }
+        BitField<40, 1, u64> brev;
+        BitField<47, 1, u64> rd_cc;
+        BitField<48, 1, u64> is_signed;
     } bfe;
 
     union {
@@ -937,6 +1004,28 @@ union Instruction {
         BitField<48, 3, UniformType> type;
         BitField<46, 2, u64> cache_mode;
     } stg;
+
+    union {
+        BitField<23, 3, AtomicOp> operation;
+        BitField<48, 1, u64> extended;
+        BitField<20, 3, GlobalAtomicType> type;
+    } red;
+
+    union {
+        BitField<52, 4, AtomicOp> operation;
+        BitField<49, 3, GlobalAtomicType> type;
+        BitField<28, 20, s64> offset;
+    } atom;
+
+    union {
+        BitField<52, 4, AtomicOp> operation;
+        BitField<28, 2, AtomicType> type;
+        BitField<30, 22, s64> offset;
+
+        s32 GetImmediateOffset() const {
+            return static_cast<s32>(offset << 2);
+        }
+    } atoms;
 
     union {
         BitField<32, 1, PhysicalAttributeDirection> direction;
@@ -1051,7 +1140,7 @@ union Instruction {
         BitField<40, 1, R2pMode> mode;
         BitField<41, 2, u64> byte;
         BitField<20, 7, u64> immediate_mask;
-    } r2p;
+    } p2r_r2p;
 
     union {
         BitField<39, 3, u64> pred39;
@@ -1065,6 +1154,11 @@ union Instruction {
         BitField<54, 1, u64> abs_a;
         BitField<55, 1, u64> ftz;
     } fset;
+
+    union {
+        BitField<47, 1, u64> ftz;
+        BitField<48, 4, PredCondition> cond;
+    } fcmp;
 
     union {
         BitField<49, 1, u64> bf;
@@ -1413,7 +1507,7 @@ union Instruction {
 
         TextureType GetTextureType() const {
             // The TLDS instruction has a weird encoding for the texture type.
-            if (texture_info >= 0 && texture_info <= 1) {
+            if (texture_info <= 1) {
                 return TextureType::Texture1D;
             }
             if (texture_info == 2 || texture_info == 8 || texture_info == 12 ||
@@ -1580,6 +1674,42 @@ union Instruction {
     } vmad;
 
     union {
+        BitField<54, 1, u64> is_dest_signed;
+        BitField<48, 1, u64> is_src_a_signed;
+        BitField<49, 1, u64> is_src_b_signed;
+        BitField<37, 2, u64> src_format_a;
+        BitField<29, 2, u64> src_format_b;
+        BitField<56, 1, u64> mx;
+        BitField<55, 1, u64> sat;
+        BitField<36, 2, u64> selector_a;
+        BitField<28, 2, u64> selector_b;
+        BitField<50, 1, u64> is_op_b_register;
+        BitField<51, 3, VmnmxOperation> operation;
+
+        VmnmxType SourceFormatA() const {
+            switch (src_format_a) {
+            case 0b11:
+                return VmnmxType::Bits32;
+            case 0b10:
+                return VmnmxType::Bits16;
+            default:
+                return VmnmxType::Bits8;
+            }
+        }
+
+        VmnmxType SourceFormatB() const {
+            switch (src_format_b) {
+            case 0b11:
+                return VmnmxType::Bits32;
+            case 0b10:
+                return VmnmxType::Bits16;
+            default:
+                return VmnmxType::Bits8;
+            }
+        }
+    } vmnmx;
+
+    union {
         BitField<20, 16, u64> imm20_16;
         BitField<35, 1, u64> high_b_rr; // used on RR
         BitField<36, 1, u64> product_shift_left;
@@ -1595,11 +1725,11 @@ union Instruction {
     } xmad;
 
     union {
-        BitField<20, 14, u64> offset;
+        BitField<20, 14, u64> shifted_offset;
         BitField<34, 5, u64> index;
 
         u64 GetOffset() const {
-            return offset * 4;
+            return shifted_offset * 4;
         }
     } cbuf34;
 
@@ -1641,11 +1771,13 @@ public:
         BRK,
         DEPBAR,
         VOTE,
+        VOTE_VTG,
         SHFL,
         FSWZADD,
         BFE_C,
         BFE_R,
         BFE_IMM,
+        BFI_RC,
         BFI_IMM_R,
         BRA,
         BRX,
@@ -1659,9 +1791,12 @@ public:
         ST_A,
         ST_L,
         ST_S,
-        ST,   // Store in generic memory
-        STG,  // Store in global memory
-        AL2P, // Transforms attribute memory into physical memory
+        ST,    // Store in generic memory
+        STG,   // Store in global memory
+        RED,   // Reduction operation
+        ATOM,  // Atomic operation on global memory
+        ATOMS, // Atomic operation on shared memory
+        AL2P,  // Transforms attribute memory into physical memory
         TEX,
         TEX_B,  // Texture Load Bindless
         TXQ,    // Texture Query
@@ -1684,9 +1819,11 @@ public:
         IPA,
         OUT_R, // Emit vertex/primitive
         ISBERD,
+        BAR,
         MEMBAR,
         VMAD,
         VSETP,
+        VMNMX,
         FFMA_IMM, // Fused Multiply and Add
         FFMA_CR,
         FFMA_RC,
@@ -1741,6 +1878,8 @@ public:
         ICMP_R,
         ICMP_CR,
         ICMP_IMM,
+        FCMP_RR,
+        FCMP_RC,
         MUFU,  // Multi-Function Operator
         RRO_C, // Range Reduction Operator
         RRO_R,
@@ -1767,7 +1906,7 @@ public:
         MOV_C,
         MOV_R,
         MOV_IMM,
-        MOV_SYS,
+        S2R,
         MOV32_IMM,
         SHL_C,
         SHL_R,
@@ -1801,6 +1940,7 @@ public:
         PSET,
         CSETP,
         R2P_IMM,
+        P2R_IMM,
         XMAD_IMM,
         XMAD_CR,
         XMAD_RC,
@@ -1950,6 +2090,7 @@ private:
             INST("111000110000----", Id::EXIT, Type::Flow, "EXIT"),
             INST("1111000011110---", Id::DEPBAR, Type::Synch, "DEPBAR"),
             INST("0101000011011---", Id::VOTE, Type::Warp, "VOTE"),
+            INST("0101000011100---", Id::VOTE_VTG, Type::Warp, "VOTE_VTG"),
             INST("1110111100010---", Id::SHFL, Type::Warp, "SHFL"),
             INST("0101000011111---", Id::FSWZADD, Type::Warp, "FSWZADD"),
             INST("1110111111011---", Id::LD_A, Type::Memory, "LD_A"),
@@ -1963,6 +2104,9 @@ private:
             INST("1110111101010---", Id::ST_L, Type::Memory, "ST_L"),
             INST("101-------------", Id::ST, Type::Memory, "ST"),
             INST("1110111011011---", Id::STG, Type::Memory, "STG"),
+            INST("1110101111111---", Id::RED, Type::Memory, "RED"),
+            INST("11101101--------", Id::ATOM, Type::Memory, "ATOM"),
+            INST("11101100--------", Id::ATOMS, Type::Memory, "ATOMS"),
             INST("1110111110100---", Id::AL2P, Type::Memory, "AL2P"),
             INST("110000----111---", Id::TEX, Type::Texture, "TEX"),
             INST("1101111010111---", Id::TEX_B, Type::Texture, "TEX_B"),
@@ -1985,9 +2129,11 @@ private:
             INST("11100000--------", Id::IPA, Type::Trivial, "IPA"),
             INST("1111101111100---", Id::OUT_R, Type::Trivial, "OUT_R"),
             INST("1110111111010---", Id::ISBERD, Type::Trivial, "ISBERD"),
+            INST("1111000010101---", Id::BAR, Type::Trivial, "BAR"),
             INST("1110111110011---", Id::MEMBAR, Type::Trivial, "MEMBAR"),
             INST("01011111--------", Id::VMAD, Type::Video, "VMAD"),
             INST("0101000011110---", Id::VSETP, Type::Video, "VSETP"),
+            INST("0011101---------", Id::VMNMX, Type::Video, "VMNMX"),
             INST("0011001-1-------", Id::FFMA_IMM, Type::Ffma, "FFMA_IMM"),
             INST("010010011-------", Id::FFMA_CR, Type::Ffma, "FFMA_CR"),
             INST("010100011-------", Id::FFMA_RC, Type::Ffma, "FFMA_RC"),
@@ -2042,6 +2188,8 @@ private:
             INST("0101110100100---", Id::HSETP2_R, Type::HalfSetPredicate, "HSETP2_R"),
             INST("0111111-0-------", Id::HSETP2_IMM, Type::HalfSetPredicate, "HSETP2_IMM"),
             INST("0101110100011---", Id::HSET2_R, Type::HalfSet, "HSET2_R"),
+            INST("010110111010----", Id::FCMP_RR, Type::Arithmetic, "FCMP_RR"),
+            INST("010010111010----", Id::FCMP_RC, Type::Arithmetic, "FCMP_RC"),
             INST("0101000010000---", Id::MUFU, Type::Arithmetic, "MUFU"),
             INST("0100110010010---", Id::RRO_C, Type::Arithmetic, "RRO_C"),
             INST("0101110010010---", Id::RRO_R, Type::Arithmetic, "RRO_R"),
@@ -2055,7 +2203,7 @@ private:
             INST("0100110010011---", Id::MOV_C, Type::Arithmetic, "MOV_C"),
             INST("0101110010011---", Id::MOV_R, Type::Arithmetic, "MOV_R"),
             INST("0011100-10011---", Id::MOV_IMM, Type::Arithmetic, "MOV_IMM"),
-            INST("1111000011001---", Id::MOV_SYS, Type::Trivial, "MOV_SYS"),
+            INST("1111000011001---", Id::S2R, Type::Trivial, "S2R"),
             INST("000000010000----", Id::MOV32_IMM, Type::ArithmeticImmediate, "MOV32_IMM"),
             INST("0100110001100---", Id::FMNMX_C, Type::Arithmetic, "FMNMX_C"),
             INST("0101110001100---", Id::FMNMX_R, Type::Arithmetic, "FMNMX_R"),
@@ -2066,6 +2214,7 @@ private:
             INST("0100110000000---", Id::BFE_C, Type::Bfe, "BFE_C"),
             INST("0101110000000---", Id::BFE_R, Type::Bfe, "BFE_R"),
             INST("0011100-00000---", Id::BFE_IMM, Type::Bfe, "BFE_IMM"),
+            INST("0101001111110---", Id::BFI_RC, Type::Bfi, "BFI_RC"),
             INST("0011011-11110---", Id::BFI_IMM_R, Type::Bfi, "BFI_IMM_R"),
             INST("0100110001000---", Id::LOP_C, Type::ArithmeticInteger, "LOP_C"),
             INST("0101110001000---", Id::LOP_R, Type::ArithmeticInteger, "LOP_R"),
@@ -2086,7 +2235,7 @@ private:
             INST("0011011-11111---", Id::SHF_LEFT_IMM, Type::Shift, "SHF_LEFT_IMM"),
             INST("0100110011100---", Id::I2I_C, Type::Conversion, "I2I_C"),
             INST("0101110011100---", Id::I2I_R, Type::Conversion, "I2I_R"),
-            INST("0011101-11100---", Id::I2I_IMM, Type::Conversion, "I2I_IMM"),
+            INST("0011100-11100---", Id::I2I_IMM, Type::Conversion, "I2I_IMM"),
             INST("0100110010111---", Id::I2F_C, Type::Conversion, "I2F_C"),
             INST("0101110010111---", Id::I2F_R, Type::Conversion, "I2F_R"),
             INST("0011100-10111---", Id::I2F_IMM, Type::Conversion, "I2F_IMM"),
@@ -2106,6 +2255,7 @@ private:
             INST("0101000010010---", Id::PSETP, Type::PredicateSetPredicate, "PSETP"),
             INST("010100001010----", Id::CSETP, Type::PredicateSetPredicate, "CSETP"),
             INST("0011100-11110---", Id::R2P_IMM, Type::RegisterSetPredicate, "R2P_IMM"),
+            INST("0011100-11101---", Id::P2R_IMM, Type::RegisterSetPredicate, "P2R_IMM"),
             INST("0011011-00------", Id::XMAD_IMM, Type::Xmad, "XMAD_IMM"),
             INST("0100111---------", Id::XMAD_CR, Type::Xmad, "XMAD_CR"),
             INST("010100010-------", Id::XMAD_RC, Type::Xmad, "XMAD_RC"),

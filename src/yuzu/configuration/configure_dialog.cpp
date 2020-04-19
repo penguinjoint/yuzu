@@ -34,13 +34,14 @@ void ConfigureDialog::SetConfiguration() {}
 
 void ConfigureDialog::ApplyConfiguration() {
     ui->generalTab->ApplyConfiguration();
-    ui->gameListTab->ApplyConfiguration();
+    ui->uiTab->ApplyConfiguration();
     ui->systemTab->ApplyConfiguration();
     ui->profileManagerTab->ApplyConfiguration();
     ui->filesystemTab->applyConfiguration();
     ui->inputTab->ApplyConfiguration();
     ui->hotkeysTab->ApplyConfiguration(registry);
     ui->graphicsTab->ApplyConfiguration();
+    ui->graphicsAdvancedTab->ApplyConfiguration();
     ui->audioTab->ApplyConfiguration();
     ui->debugTab->ApplyConfiguration();
     ui->webTab->ApplyConfiguration();
@@ -73,11 +74,11 @@ void ConfigureDialog::RetranslateUI() {
 Q_DECLARE_METATYPE(QList<QWidget*>);
 
 void ConfigureDialog::PopulateSelectionList() {
-    const std::array<std::pair<QString, QList<QWidget*>>, 4> items{
-        {{tr("General"), {ui->generalTab, ui->webTab, ui->debugTab, ui->gameListTab}},
-         {tr("System"),
-          {ui->systemTab, ui->profileManagerTab, ui->serviceTab, ui->filesystemTab, ui->audioTab}},
-         {tr("Graphics"), {ui->graphicsTab}},
+    const std::array<std::pair<QString, QList<QWidget*>>, 5> items{
+        {{tr("General"), {ui->generalTab, ui->webTab, ui->debugTab, ui->uiTab}},
+         {tr("System"), {ui->systemTab, ui->profileManagerTab, ui->serviceTab, ui->filesystemTab}},
+         {tr("Graphics"), {ui->graphicsTab, ui->graphicsAdvancedTab}},
+         {tr("Audio"), {ui->audioTab}},
          {tr("Controls"), {ui->inputTab, ui->hotkeysTab}}},
     };
 
@@ -105,10 +106,11 @@ void ConfigureDialog::UpdateVisibleTabs() {
         {ui->inputTab, tr("Input")},
         {ui->hotkeysTab, tr("Hotkeys")},
         {ui->graphicsTab, tr("Graphics")},
+        {ui->graphicsAdvancedTab, tr("Advanced")},
         {ui->audioTab, tr("Audio")},
         {ui->debugTab, tr("Debug")},
         {ui->webTab, tr("Web")},
-        {ui->gameListTab, tr("Game List")},
+        {ui->uiTab, tr("UI")},
         {ui->filesystemTab, tr("Filesystem")},
         {ui->serviceTab, tr("Services")},
     };

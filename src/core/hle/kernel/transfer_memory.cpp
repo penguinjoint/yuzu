@@ -2,24 +2,32 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-#include "core/hle/kernel/errors.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/memory/page_table.h"
 #include "core/hle/kernel/process.h"
-#include "core/hle/kernel/shared_memory.h"
 #include "core/hle/kernel/transfer_memory.h"
 #include "core/hle/result.h"
+#include "core/memory.h"
 
 namespace Kernel {
 
-TransferMemory::TransferMemory(KernelCore& kernel) : Object{kernel} {}
-TransferMemory::~TransferMemory() = default;
+TransferMemory::TransferMemory(KernelCore& kernel, Core::Memory::Memory& memory)
+    : Object{kernel}, memory{memory} {}
 
-std::shared_ptr<TransferMemory> TransferMemory::Create(KernelCore& kernel, VAddr base_address,
-                                                       u64 size, MemoryPermission permissions) {
-    std::shared_ptr<TransferMemory> transfer_memory{std::make_shared<TransferMemory>(kernel)};
+TransferMemory::~TransferMemory() {
+    // Release memory region when transfer memory is destroyed
+    Reset();
+}
+
+std::shared_ptr<TransferMemory> TransferMemory::Create(KernelCore& kernel,
+                                                       Core::Memory::Memory& memory,
+                                                       VAddr base_address, std::size_t size,
+                                                       Memory::MemoryPermission permissions) {
+    std::shared_ptr<TransferMemory> transfer_memory{
+        std::make_shared<TransferMemory>(kernel, memory)};
 
     transfer_memory->base_address = base_address;
-    transfer_memory->memory_size = size;
+    transfer_memory->size = size;
     transfer_memory->owner_permissions = permissions;
     transfer_memory->owner_process = kernel.CurrentProcess();
 
@@ -27,55 +35,15 @@ std::shared_ptr<TransferMemory> TransferMemory::Create(KernelCore& kernel, VAddr
 }
 
 const u8* TransferMemory::GetPointer() const {
-    return backing_block.get()->data();
+    return memory.GetPointer(base_address);
 }
 
-u64 TransferMemory::GetSize() const {
-    return memory_size;
+ResultCode TransferMemory::Reserve() {
+    return owner_process->PageTable().ReserveTransferMemory(base_address, size, owner_permissions);
 }
 
-ResultCode TransferMemory::MapMemory(VAddr address, u64 size, MemoryPermission permissions) {
-    if (memory_size != size) {
-        return ERR_INVALID_SIZE;
-    }
-
-    if (owner_permissions != permissions) {
-        return ERR_INVALID_STATE;
-    }
-
-    if (is_mapped) {
-        return ERR_INVALID_STATE;
-    }
-
-    backing_block = std::make_shared<PhysicalMemory>(size);
-
-    const auto map_state = owner_permissions == MemoryPermission::None
-                               ? MemoryState::TransferMemoryIsolated
-                               : MemoryState::TransferMemory;
-    auto& vm_manager = owner_process->VMManager();
-    const auto map_result = vm_manager.MapMemoryBlock(address, backing_block, 0, size, map_state);
-    if (map_result.Failed()) {
-        return map_result.Code();
-    }
-
-    is_mapped = true;
-    return RESULT_SUCCESS;
-}
-
-ResultCode TransferMemory::UnmapMemory(VAddr address, u64 size) {
-    if (memory_size != size) {
-        return ERR_INVALID_SIZE;
-    }
-
-    auto& vm_manager = owner_process->VMManager();
-    const auto result = vm_manager.UnmapRange(address, size);
-
-    if (result.IsError()) {
-        return result;
-    }
-
-    is_mapped = false;
-    return RESULT_SUCCESS;
+ResultCode TransferMemory::Reset() {
+    return owner_process->PageTable().ResetTransferMemory(base_address, size);
 }
 
 } // namespace Kernel

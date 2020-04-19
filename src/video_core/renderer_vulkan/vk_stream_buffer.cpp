@@ -3,86 +3,152 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
-#include <memory>
 #include <optional>
+#include <tuple>
 #include <vector>
 
+#include "common/alignment.h"
 #include "common/assert.h"
-#include "video_core/renderer_vulkan/declarations.h"
 #include "video_core/renderer_vulkan/vk_device.h"
-#include "video_core/renderer_vulkan/vk_memory_manager.h"
 #include "video_core/renderer_vulkan/vk_resource_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_stream_buffer.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Vulkan {
+
+namespace {
 
 constexpr u64 WATCHES_INITIAL_RESERVE = 0x4000;
 constexpr u64 WATCHES_RESERVE_CHUNK = 0x1000;
 
-VKStreamBuffer::VKStreamBuffer(const VKDevice& device, VKMemoryManager& memory_manager,
-                               VKScheduler& scheduler, u64 size, vk::BufferUsageFlags usage,
-                               vk::AccessFlags access, vk::PipelineStageFlags pipeline_stage)
-    : device{device}, scheduler{scheduler}, buffer_size{size}, access{access}, pipeline_stage{
-                                                                                   pipeline_stage} {
-    CreateBuffers(memory_manager, usage);
-    ReserveWatches(WATCHES_INITIAL_RESERVE);
+constexpr u64 STREAM_BUFFER_SIZE = 256 * 1024 * 1024;
+
+std::optional<u32> FindMemoryType(const VKDevice& device, u32 filter,
+                                  VkMemoryPropertyFlags wanted) {
+    const auto properties = device.GetPhysical().GetMemoryProperties();
+    for (u32 i = 0; i < properties.memoryTypeCount; i++) {
+        if (!(filter & (1 << i))) {
+            continue;
+        }
+        if ((properties.memoryTypes[i].propertyFlags & wanted) == wanted) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+} // Anonymous namespace
+
+VKStreamBuffer::VKStreamBuffer(const VKDevice& device, VKScheduler& scheduler,
+                               VkBufferUsageFlags usage)
+    : device{device}, scheduler{scheduler} {
+    CreateBuffers(usage);
+    ReserveWatches(current_watches, WATCHES_INITIAL_RESERVE);
+    ReserveWatches(previous_watches, WATCHES_INITIAL_RESERVE);
 }
 
 VKStreamBuffer::~VKStreamBuffer() = default;
 
-std::tuple<u8*, u64, bool> VKStreamBuffer::Reserve(u64 size) {
-    ASSERT(size <= buffer_size);
+std::tuple<u8*, u64, bool> VKStreamBuffer::Map(u64 size, u64 alignment) {
+    ASSERT(size <= STREAM_BUFFER_SIZE);
     mapped_size = size;
 
-    if (offset + size > buffer_size) {
-        // The buffer would overflow, save the amount of used buffers, signal an invalidation and
-        // reset the state.
-        invalidation_mark = used_watches;
-        used_watches = 0;
-        offset = 0;
+    if (alignment > 0) {
+        offset = Common::AlignUp(offset, alignment);
     }
 
-    return {mapped_pointer + offset, offset, invalidation_mark.has_value()};
+    WaitPendingOperations(offset);
+
+    bool invalidated = false;
+    if (offset + size > STREAM_BUFFER_SIZE) {
+        // The buffer would overflow, save the amount of used watches and reset the state.
+        invalidation_mark = current_watch_cursor;
+        current_watch_cursor = 0;
+        offset = 0;
+
+        // Swap watches and reset waiting cursors.
+        std::swap(previous_watches, current_watches);
+        wait_cursor = 0;
+        wait_bound = 0;
+
+        // Ensure that we don't wait for uncommitted fences.
+        scheduler.Flush();
+
+        invalidated = true;
+    }
+
+    return {memory.Map(offset, size), offset, invalidated};
 }
 
-void VKStreamBuffer::Send(u64 size) {
+void VKStreamBuffer::Unmap(u64 size) {
     ASSERT_MSG(size <= mapped_size, "Reserved size is too small");
 
-    if (invalidation_mark) {
-        // TODO(Rodrigo): Find a better way to invalidate than waiting for all watches to finish.
-        scheduler.Flush();
-        std::for_each(watches.begin(), watches.begin() + *invalidation_mark,
-                      [&](auto& resource) { resource->Wait(); });
-        invalidation_mark = std::nullopt;
-    }
-
-    if (used_watches + 1 >= watches.size()) {
-        // Ensure that there are enough watches.
-        ReserveWatches(WATCHES_RESERVE_CHUNK);
-    }
-    // Add a watch for this allocation.
-    watches[used_watches++]->Watch(scheduler.GetFence());
+    memory.Unmap();
 
     offset += size;
+
+    if (current_watch_cursor + 1 >= current_watches.size()) {
+        // Ensure that there are enough watches.
+        ReserveWatches(current_watches, WATCHES_RESERVE_CHUNK);
+    }
+    auto& watch = current_watches[current_watch_cursor++];
+    watch.upper_bound = offset;
+    watch.fence.Watch(scheduler.GetFence());
 }
 
-void VKStreamBuffer::CreateBuffers(VKMemoryManager& memory_manager, vk::BufferUsageFlags usage) {
-    const vk::BufferCreateInfo buffer_ci({}, buffer_size, usage, vk::SharingMode::eExclusive, 0,
-                                         nullptr);
+void VKStreamBuffer::CreateBuffers(VkBufferUsageFlags usage) {
+    VkBufferCreateInfo buffer_ci;
+    buffer_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_ci.pNext = nullptr;
+    buffer_ci.flags = 0;
+    buffer_ci.size = STREAM_BUFFER_SIZE;
+    buffer_ci.usage = usage;
+    buffer_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    buffer_ci.queueFamilyIndexCount = 0;
+    buffer_ci.pQueueFamilyIndices = nullptr;
 
-    const auto dev = device.GetLogical();
+    const auto& dev = device.GetLogical();
+    buffer = dev.CreateBuffer(buffer_ci);
+
     const auto& dld = device.GetDispatchLoader();
-    buffer = dev.createBufferUnique(buffer_ci, nullptr, dld);
-    commit = memory_manager.Commit(*buffer, true);
-    mapped_pointer = commit->GetData();
+    const auto requirements = dev.GetBufferMemoryRequirements(*buffer);
+    // Prefer device local host visible allocations (this should hit AMD's pinned memory).
+    auto type =
+        FindMemoryType(device, requirements.memoryTypeBits,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (!type) {
+        // Otherwise search for a host visible allocation.
+        type = FindMemoryType(device, requirements.memoryTypeBits,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        ASSERT_MSG(type, "No host visible and coherent memory type found");
+    }
+    VkMemoryAllocateInfo memory_ai;
+    memory_ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    memory_ai.pNext = nullptr;
+    memory_ai.allocationSize = requirements.size;
+    memory_ai.memoryTypeIndex = *type;
+
+    memory = dev.AllocateMemory(memory_ai);
+    buffer.BindMemory(*memory, 0);
 }
 
-void VKStreamBuffer::ReserveWatches(std::size_t grow_size) {
-    const std::size_t previous_size = watches.size();
-    watches.resize(previous_size + grow_size);
-    std::generate(watches.begin() + previous_size, watches.end(),
-                  []() { return std::make_unique<VKFenceWatch>(); });
+void VKStreamBuffer::ReserveWatches(std::vector<Watch>& watches, std::size_t grow_size) {
+    watches.resize(watches.size() + grow_size);
+}
+
+void VKStreamBuffer::WaitPendingOperations(u64 requested_upper_bound) {
+    if (!invalidation_mark) {
+        return;
+    }
+    while (requested_upper_bound < wait_bound && wait_cursor < *invalidation_mark) {
+        auto& watch = previous_watches[wait_cursor];
+        wait_bound = watch.upper_bound;
+        watch.fence.Wait();
+        ++wait_cursor;
+    }
 }
 
 } // namespace Vulkan

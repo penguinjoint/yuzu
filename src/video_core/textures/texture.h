@@ -131,6 +131,20 @@ enum class SwizzleSource : u32 {
     OneFloat = 7,
 };
 
+enum class MsaaMode : u32 {
+    Msaa1x1 = 0,
+    Msaa2x1 = 1,
+    Msaa2x2 = 2,
+    Msaa4x2 = 3,
+    Msaa4x2_D3D = 4,
+    Msaa2x1_D3D = 5,
+    Msaa4x4 = 6,
+    Msaa2x2_VC4 = 8,
+    Msaa2x2_VC12 = 9,
+    Msaa4x2_VC8 = 10,
+    Msaa4x2_VC24 = 11,
+};
+
 union TextureHandle {
     TextureHandle(u32 raw) : raw{raw} {}
 
@@ -197,6 +211,7 @@ struct TICEntry {
     union {
         BitField<0, 4, u32> res_min_mip_level;
         BitField<4, 4, u32> res_max_mip_level;
+        BitField<8, 4, MsaaMode> msaa_mode;
         BitField<12, 12, u32> min_lod_clamp;
     };
 
@@ -294,6 +309,14 @@ enum class TextureMipmapFilter : u32 {
     Linear = 3,
 };
 
+enum class Anisotropy {
+    Default,
+    Filter2x,
+    Filter4x,
+    Filter8x,
+    Filter16x,
+};
+
 struct TSCEntry {
     union {
         struct {
@@ -327,9 +350,9 @@ struct TSCEntry {
         std::array<u8, 0x20> raw;
     };
 
-    float GetMaxAnisotropy() const {
-        return static_cast<float>(1U << max_anisotropy);
-    }
+    std::array<float, 4> GetBorderColor() const noexcept;
+
+    float GetMaxAnisotropy() const noexcept;
 
     float GetMinLod() const {
         return static_cast<float>(min_lod_clamp) / 256.0f;
@@ -343,15 +366,6 @@ struct TSCEntry {
         // Sign extend the 13-bit value.
         constexpr u32 mask = 1U << (13 - 1);
         return static_cast<float>(static_cast<s32>((mip_lod_bias ^ mask) - mask)) / 256.0f;
-    }
-
-    std::array<float, 4> GetBorderColor() const {
-        if (srgb_conversion) {
-            return {static_cast<float>(srgb_border_color_r) / 255.0f,
-                    static_cast<float>(srgb_border_color_g) / 255.0f,
-                    static_cast<float>(srgb_border_color_b) / 255.0f, border_color[3]};
-        }
-        return border_color;
     }
 };
 static_assert(sizeof(TSCEntry) == 0x20, "TSCEntry has wrong size");

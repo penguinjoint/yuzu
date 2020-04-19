@@ -27,6 +27,7 @@ using VideoCommon::ViewParams;
 class CachedSurfaceView;
 class CachedSurface;
 class TextureCacheOpenGL;
+class StateTracker;
 
 using Surface = std::shared_ptr<CachedSurface>;
 using View = std::shared_ptr<CachedSurfaceView>;
@@ -36,7 +37,7 @@ class CachedSurface final : public VideoCommon::SurfaceBase<View> {
     friend CachedSurfaceView;
 
 public:
-    explicit CachedSurface(GPUVAddr gpu_addr, const SurfaceParams& params);
+    explicit CachedSurface(GPUVAddr gpu_addr, const SurfaceParams& params, bool is_astc_supported);
     ~CachedSurface();
 
     void UploadTexture(const std::vector<u8>& staging_buffer) override;
@@ -48,6 +49,10 @@ public:
 
     GLuint GetTexture() const {
         return texture.handle;
+    }
+
+    bool IsCompressed() const {
+        return is_compressed;
     }
 
 protected:
@@ -96,6 +101,10 @@ public:
         return texture_view.handle;
     }
 
+    GLenum GetFormat() const {
+        return format;
+    }
+
     const SurfaceParams& GetSurfaceParams() const {
         return surface.GetSurfaceParams();
     }
@@ -113,6 +122,7 @@ private:
 
     CachedSurface& surface;
     GLenum target{};
+    GLenum format{};
 
     OGLTextureView texture_view;
     u32 swizzle{};
@@ -122,7 +132,7 @@ private:
 class TextureCacheOpenGL final : public TextureCacheBase {
 public:
     explicit TextureCacheOpenGL(Core::System& system, VideoCore::RasterizerInterface& rasterizer,
-                                const Device& device);
+                                const Device& device, StateTracker& state_tracker);
     ~TextureCacheOpenGL();
 
 protected:
@@ -138,6 +148,8 @@ protected:
 
 private:
     GLuint FetchPBO(std::size_t buffer_size);
+
+    StateTracker& state_tracker;
 
     OGLFramebuffer src_framebuffer;
     OGLFramebuffer dst_framebuffer;

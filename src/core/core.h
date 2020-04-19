@@ -36,9 +36,10 @@ class AppLoader;
 enum class ResultStatus : u16;
 } // namespace Loader
 
-namespace Memory {
+namespace Core::Memory {
 struct CheatEntry;
-} // namespace Memory
+class Memory;
+} // namespace Core::Memory
 
 namespace Service {
 
@@ -86,14 +87,11 @@ namespace Core::Hardware {
 class InterruptManager;
 }
 
-namespace Memory {
-class Memory;
-}
-
 namespace Core {
 
 class ARM_Interface;
-class Cpu;
+class CoreManager;
+class DeviceMemory;
 class ExclusiveMonitor;
 class FrameLimiter;
 class PerfStats;
@@ -218,10 +216,10 @@ public:
     const ARM_Interface& ArmInterface(std::size_t core_index) const;
 
     /// Gets a CPU interface to the CPU core with the specified index
-    Cpu& CpuCore(std::size_t core_index);
+    CoreManager& GetCoreManager(std::size_t core_index);
 
     /// Gets a CPU interface to the CPU core with the specified index
-    const Cpu& CpuCore(std::size_t core_index) const;
+    const CoreManager& GetCoreManager(std::size_t core_index) const;
 
     /// Gets a reference to the exclusive monitor
     ExclusiveMonitor& Monitor();
@@ -230,10 +228,10 @@ public:
     const ExclusiveMonitor& Monitor() const;
 
     /// Gets a mutable reference to the system memory instance.
-    Memory::Memory& Memory();
+    Core::Memory::Memory& Memory();
 
     /// Gets a constant reference to the system memory instance.
-    const Memory::Memory& Memory() const;
+    const Core::Memory::Memory& Memory() const;
 
     /// Gets a mutable reference to the GPU interface
     Tegra::GPU& GPU();
@@ -258,6 +256,12 @@ public:
 
     /// Gets the global scheduler
     const Kernel::GlobalScheduler& GlobalScheduler() const;
+
+    /// Gets the manager for the guest device memory
+    Core::DeviceMemory& DeviceMemory();
+
+    /// Gets the manager for the guest device memory
+    const Core::DeviceMemory& DeviceMemory() const;
 
     /// Provides a pointer to the current process
     Kernel::Process* CurrentProcess();
@@ -306,10 +310,6 @@ public:
 
     Service::SM::ServiceManager& ServiceManager();
     const Service::SM::ServiceManager& ServiceManager() const;
-
-    void SetGPUDebugContext(std::shared_ptr<Tegra::DebugContext> context);
-
-    Tegra::DebugContext* GetGPUDebugContext() const;
 
     void SetFilesystem(std::shared_ptr<FileSys::VfsFilesystem> vfs);
 
@@ -364,14 +364,20 @@ public:
 
     const CurrentBuildProcessID& GetCurrentProcessBuildID() const;
 
+    /// Register a host thread as an emulated CPU Core.
+    void RegisterCoreThread(std::size_t id);
+
+    /// Register a host thread as an auxiliary thread.
+    void RegisterHostThread();
+
 private:
     System();
 
     /// Returns the currently running CPU core
-    Cpu& CurrentCpuCore();
+    CoreManager& CurrentCoreManager();
 
     /// Returns the currently running CPU core
-    const Cpu& CurrentCpuCore() const;
+    const CoreManager& CurrentCoreManager() const;
 
     /**
      * Initialize the emulated system.

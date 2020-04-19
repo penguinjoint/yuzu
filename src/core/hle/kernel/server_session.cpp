@@ -24,7 +24,7 @@
 
 namespace Kernel {
 
-ServerSession::ServerSession(KernelCore& kernel) : WaitObject{kernel} {}
+ServerSession::ServerSession(KernelCore& kernel) : SynchronizationObject{kernel} {}
 ServerSession::~ServerSession() = default;
 
 ResultVal<std::shared_ptr<ServerSession>> ServerSession::Create(KernelCore& kernel,
@@ -48,6 +48,16 @@ bool ServerSession::ShouldWait(const Thread* thread) const {
 
     // Wait if we have no pending requests, or if we're currently handling a request.
     return pending_requesting_threads.empty() || currently_handling != nullptr;
+}
+
+bool ServerSession::IsSignaled() const {
+    // Closed sessions should never wait, an error will be returned from svcReplyAndReceive.
+    if (!parent->Client()) {
+        return true;
+    }
+
+    // Wait if we have no pending requests, or if we're currently handling a request.
+    return !pending_requesting_threads.empty() && currently_handling == nullptr;
 }
 
 void ServerSession::Acquire(Thread* thread) {
@@ -124,7 +134,8 @@ ResultCode ServerSession::HandleDomainSyncRequest(Kernel::HLERequestContext& con
     return RESULT_SUCCESS;
 }
 
-ResultCode ServerSession::QueueSyncRequest(std::shared_ptr<Thread> thread, Memory::Memory& memory) {
+ResultCode ServerSession::QueueSyncRequest(std::shared_ptr<Thread> thread,
+                                           Core::Memory::Memory& memory) {
     u32* cmd_buf{reinterpret_cast<u32*>(memory.GetPointer(thread->GetTLSAddress()))};
     std::shared_ptr<Kernel::HLERequestContext> context{
         std::make_shared<Kernel::HLERequestContext>(SharedFrom(this), std::move(thread))};
@@ -168,7 +179,7 @@ ResultCode ServerSession::CompleteSyncRequest() {
 }
 
 ResultCode ServerSession::HandleSyncRequest(std::shared_ptr<Thread> thread,
-                                            Memory::Memory& memory) {
+                                            Core::Memory::Memory& memory) {
     Core::System::GetInstance().CoreTiming().ScheduleEvent(20000, request_event, {});
     return QueueSyncRequest(std::move(thread), memory);
 }

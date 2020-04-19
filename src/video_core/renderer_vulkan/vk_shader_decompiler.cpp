@@ -5,7 +5,9 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <optional>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 #include <fmt/format.h>
@@ -24,6 +26,7 @@
 #include "video_core/renderer_vulkan/vk_shader_decompiler.h"
 #include "video_core/shader/node.h"
 #include "video_core/shader/shader_ir.h"
+#include "video_core/shader/transform_feedback.h"
 
 namespace Vulkan {
 
@@ -32,7 +35,7 @@ namespace {
 using Sirit::Id;
 using Tegra::Engines::ShaderType;
 using Tegra::Shader::Attribute;
-using Tegra::Shader::AttributeUse;
+using Tegra::Shader::PixelImap;
 using Tegra::Shader::Register;
 using namespace VideoCommon::Shader;
 
@@ -69,8 +72,9 @@ struct TexelBuffer {
 
 struct SampledImage {
     Id image_type{};
-    Id sampled_image_type{};
-    Id sampler{};
+    Id sampler_type{};
+    Id sampler_pointer_type{};
+    Id variable{};
 };
 
 struct StorageImage {
@@ -86,9 +90,16 @@ struct AttributeType {
 
 struct VertexIndices {
     std::optional<u32> position;
+    std::optional<u32> layer;
     std::optional<u32> viewport;
     std::optional<u32> point_size;
     std::optional<u32> clip_distances;
+};
+
+struct GenericVaryingDescription {
+    Id id = nullptr;
+    u32 first_element = 0;
+    bool is_scalar = false;
 };
 
 spv::Dim GetSamplerDim(const Sampler& sampler) {
@@ -264,9 +275,13 @@ bool IsPrecise(Operation operand) {
 class SPIRVDecompiler final : public Sirit::Module {
 public:
     explicit SPIRVDecompiler(const VKDevice& device, const ShaderIR& ir, ShaderType stage,
-                             const Specialization& specialization)
+                             const Registry& registry, const Specialization& specialization)
         : Module(0x00010300), device{device}, ir{ir}, stage{stage}, header{ir.GetHeader()},
-          specialization{specialization} {
+          registry{registry}, specialization{specialization} {
+        if (stage != ShaderType::Compute) {
+            transform_feedback = BuildTransformFeedback(registry.GetGraphicsInfo());
+        }
+
         AddCapability(spv::Capability::Shader);
         AddCapability(spv::Capability::UniformAndStorageBuffer16BitAccess);
         AddCapability(spv::Capability::ImageQuery);
@@ -275,19 +290,36 @@ public:
         AddCapability(spv::Capability::ImageGatherExtended);
         AddCapability(spv::Capability::SampledBuffer);
         AddCapability(spv::Capability::StorageImageWriteWithoutFormat);
+        AddCapability(spv::Capability::DrawParameters);
         AddCapability(spv::Capability::SubgroupBallotKHR);
         AddCapability(spv::Capability::SubgroupVoteKHR);
         AddExtension("SPV_KHR_shader_ballot");
         AddExtension("SPV_KHR_subgroup_vote");
         AddExtension("SPV_KHR_storage_buffer_storage_class");
         AddExtension("SPV_KHR_variable_pointers");
+        AddExtension("SPV_KHR_shader_draw_parameters");
 
-        if (ir.UsesViewportIndex()) {
-            AddCapability(spv::Capability::MultiViewport);
-            if (device.IsExtShaderViewportIndexLayerSupported()) {
+        if (!transform_feedback.empty()) {
+            if (device.IsExtTransformFeedbackSupported()) {
+                AddCapability(spv::Capability::TransformFeedback);
+            } else {
+                LOG_ERROR(Render_Vulkan, "Shader requires transform feedbacks but these are not "
+                                         "supported on this device");
+            }
+        }
+
+        if (ir.UsesLayer() || ir.UsesViewportIndex()) {
+            if (ir.UsesViewportIndex()) {
+                AddCapability(spv::Capability::MultiViewport);
+            }
+            if (stage != ShaderType::Geometry && device.IsExtShaderViewportIndexLayerSupported()) {
                 AddExtension("SPV_EXT_shader_viewport_index_layer");
                 AddCapability(spv::Capability::ShaderViewportIndexLayerEXT);
             }
+        }
+
+        if (device.IsFormatlessImageLoadSupported()) {
+            AddCapability(spv::Capability::StorageImageReadWithoutFormat);
         }
 
         if (device.IsFloat16Supported()) {
@@ -308,25 +340,29 @@ public:
             AddExecutionMode(main, spv::ExecutionMode::OutputVertices,
                              header.common2.threads_per_input_primitive);
             break;
-        case ShaderType::TesselationEval:
+        case ShaderType::TesselationEval: {
+            const auto& info = registry.GetGraphicsInfo();
             AddCapability(spv::Capability::Tessellation);
             AddEntryPoint(spv::ExecutionModel::TessellationEvaluation, main, "main", interfaces);
-            AddExecutionMode(main, GetExecutionMode(specialization.tessellation.primitive));
-            AddExecutionMode(main, GetExecutionMode(specialization.tessellation.spacing));
-            AddExecutionMode(main, specialization.tessellation.clockwise
+            AddExecutionMode(main, GetExecutionMode(info.tessellation_primitive));
+            AddExecutionMode(main, GetExecutionMode(info.tessellation_spacing));
+            AddExecutionMode(main, info.tessellation_clockwise
                                        ? spv::ExecutionMode::VertexOrderCw
                                        : spv::ExecutionMode::VertexOrderCcw);
             break;
-        case ShaderType::Geometry:
+        }
+        case ShaderType::Geometry: {
+            const auto& info = registry.GetGraphicsInfo();
             AddCapability(spv::Capability::Geometry);
             AddEntryPoint(spv::ExecutionModel::Geometry, main, "main", interfaces);
-            AddExecutionMode(main, GetExecutionMode(specialization.primitive_topology));
+            AddExecutionMode(main, GetExecutionMode(info.primitive_topology));
             AddExecutionMode(main, GetExecutionMode(header.common3.output_topology));
             AddExecutionMode(main, spv::ExecutionMode::OutputVertices,
                              header.common4.max_output_vertices);
             // TODO(Rodrigo): Where can we get this info from?
             AddExecutionMode(main, spv::ExecutionMode::Invocations, 1U);
             break;
+        }
         case ShaderType::Fragment:
             AddEntryPoint(spv::ExecutionModel::Fragment, main, "main", interfaces);
             AddExecutionMode(main, spv::ExecutionMode::OriginUpperLeft);
@@ -353,6 +389,7 @@ private:
         DeclareFragment();
         DeclareCompute();
         DeclareRegisters();
+        DeclareCustomVariables();
         DeclarePredicates();
         DeclareLocalMemory();
         DeclareSharedMemory();
@@ -491,9 +528,11 @@ private:
         interfaces.push_back(AddGlobalVariable(Name(out_vertex, "out_vertex")));
 
         // Declare input attributes
-        vertex_index = DeclareInputBuiltIn(spv::BuiltIn::VertexIndex, t_in_uint, "vertex_index");
+        vertex_index = DeclareInputBuiltIn(spv::BuiltIn::VertexIndex, t_in_int, "vertex_index");
         instance_index =
-            DeclareInputBuiltIn(spv::BuiltIn::InstanceIndex, t_in_uint, "instance_index");
+            DeclareInputBuiltIn(spv::BuiltIn::InstanceIndex, t_in_int, "instance_index");
+        base_vertex = DeclareInputBuiltIn(spv::BuiltIn::BaseVertex, t_in_int, "base_vertex");
+        base_instance = DeclareInputBuiltIn(spv::BuiltIn::BaseInstance, t_in_int, "base_instance");
     }
 
     void DeclareTessControl() {
@@ -532,7 +571,8 @@ private:
         if (stage != ShaderType::Geometry) {
             return;
         }
-        const u32 num_input = GetNumPrimitiveTopologyVertices(specialization.primitive_topology);
+        const auto& info = registry.GetGraphicsInfo();
+        const u32 num_input = GetNumPrimitiveTopologyVertices(info.primitive_topology);
         DeclareInputVertexArray(num_input);
         DeclareOutputVertex();
     }
@@ -542,11 +582,10 @@ private:
             return;
         }
 
-        for (u32 rt = 0; rt < static_cast<u32>(frag_colors.size()); ++rt) {
-            if (!specialization.enabled_rendertargets[rt]) {
+        for (u32 rt = 0; rt < static_cast<u32>(std::size(frag_colors)); ++rt) {
+            if (!IsRenderTargetEnabled(rt)) {
                 continue;
             }
-
             const Id id = AddGlobalVariable(OpVariable(t_out_float4, spv::StorageClass::Output));
             Name(id, fmt::format("frag_color{}", rt));
             Decorate(id, spv::Decoration::Location, rt);
@@ -584,6 +623,15 @@ private:
             const Id id = OpVariable(t_prv_float, spv::StorageClass::Private, v_float_zero);
             Name(id, fmt::format("gpr_{}", gpr));
             registers.emplace(gpr, AddGlobalVariable(id));
+        }
+    }
+
+    void DeclareCustomVariables() {
+        const u32 num_custom_variables = ir.GetNumCustomVariables();
+        for (u32 i = 0; i < num_custom_variables; ++i) {
+            const Id id = OpVariable(t_prv_float, spv::StorageClass::Private, v_float_zero);
+            Name(id, fmt::format("custom_var_{}", i));
+            custom_variables.emplace(i, AddGlobalVariable(id));
         }
     }
 
@@ -704,15 +752,15 @@ private:
             if (stage != ShaderType::Fragment) {
                 continue;
             }
-            switch (header.ps.GetAttributeUse(location)) {
-            case AttributeUse::Constant:
+            switch (header.ps.GetPixelImap(location)) {
+            case PixelImap::Constant:
                 Decorate(id, spv::Decoration::Flat);
                 break;
-            case AttributeUse::ScreenLinear:
-                Decorate(id, spv::Decoration::NoPerspective);
-                break;
-            case AttributeUse::Perspective:
+            case PixelImap::Perspective:
                 // Default
+                break;
+            case PixelImap::ScreenLinear:
+                Decorate(id, spv::Decoration::NoPerspective);
                 break;
             default:
                 UNREACHABLE_MSG("Unused attribute being fetched");
@@ -721,17 +769,39 @@ private:
     }
 
     void DeclareOutputAttributes() {
+        if (stage == ShaderType::Compute || stage == ShaderType::Fragment) {
+            return;
+        }
+
+        UNIMPLEMENTED_IF(registry.GetGraphicsInfo().tfb_enabled && stage != ShaderType::Vertex);
         for (const auto index : ir.GetOutputAttributes()) {
             if (!IsGenericAttribute(index)) {
                 continue;
             }
-            const u32 location = GetGenericAttributeLocation(index);
-            Id type = t_float4;
+            DeclareOutputAttribute(index);
+        }
+    }
+
+    void DeclareOutputAttribute(Attribute::Index index) {
+        static constexpr std::string_view swizzle = "xyzw";
+
+        const u32 location = GetGenericAttributeLocation(index);
+        u8 element = 0;
+        while (element < 4) {
+            const std::size_t remainder = 4 - element;
+
+            std::size_t num_components = remainder;
+            const std::optional tfb = GetTransformFeedbackInfo(index, element);
+            if (tfb) {
+                num_components = tfb->components;
+            }
+
+            Id type = GetTypeVectorDefinitionLut(Type::Float).at(num_components - 1);
             Id varying_default = v_varying_default;
             if (IsOutputAttributeArray()) {
                 const u32 num = GetNumOutputVertices();
                 type = TypeArray(type, Constant(t_uint, num));
-                if (device.GetDriverID() != vk::DriverIdKHR::eIntelProprietaryWindows) {
+                if (device.GetDriverID() != VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS_KHR) {
                     // Intel's proprietary driver fails to setup defaults for arrayed output
                     // attributes.
                     varying_default = ConstantComposite(type, std::vector(num, varying_default));
@@ -739,13 +809,45 @@ private:
             }
             type = TypePointer(spv::StorageClass::Output, type);
 
+            std::string name = fmt::format("out_attr{}", location);
+            if (num_components < 4 || element > 0) {
+                name = fmt::format("{}_{}", name, swizzle.substr(element, num_components));
+            }
+
             const Id id = OpVariable(type, spv::StorageClass::Output, varying_default);
-            Name(AddGlobalVariable(id), fmt::format("out_attr{}", location));
-            output_attributes.emplace(index, id);
+            Name(AddGlobalVariable(id), name);
+
+            GenericVaryingDescription description;
+            description.id = id;
+            description.first_element = element;
+            description.is_scalar = num_components == 1;
+            for (u32 i = 0; i < num_components; ++i) {
+                const u8 offset = static_cast<u8>(static_cast<u32>(index) * 4 + element + i);
+                output_attributes.emplace(offset, description);
+            }
             interfaces.push_back(id);
 
             Decorate(id, spv::Decoration::Location, location);
+            if (element > 0) {
+                Decorate(id, spv::Decoration::Component, static_cast<u32>(element));
+            }
+            if (tfb && device.IsExtTransformFeedbackSupported()) {
+                Decorate(id, spv::Decoration::XfbBuffer, static_cast<u32>(tfb->buffer));
+                Decorate(id, spv::Decoration::XfbStride, static_cast<u32>(tfb->stride));
+                Decorate(id, spv::Decoration::Offset, static_cast<u32>(tfb->offset));
+            }
+
+            element = static_cast<u8>(static_cast<std::size_t>(element) + num_components);
         }
+    }
+
+    std::optional<VaryingTFB> GetTransformFeedbackInfo(Attribute::Index index, u8 element = 0) {
+        const u8 location = static_cast<u8>(static_cast<u32>(index) * 4 + element);
+        const auto it = transform_feedback.find(location);
+        if (it == transform_feedback.end()) {
+            return {};
+        }
+        return it->second;
     }
 
     u32 DeclareConstantBuffers(u32 binding) {
@@ -813,16 +915,20 @@ private:
             constexpr int sampled = 1;
             constexpr auto format = spv::ImageFormat::Unknown;
             const Id image_type = TypeImage(t_float, dim, depth, arrayed, ms, sampled, format);
-            const Id sampled_image_type = TypeSampledImage(image_type);
-            const Id pointer_type =
-                TypePointer(spv::StorageClass::UniformConstant, sampled_image_type);
+            const Id sampler_type = TypeSampledImage(image_type);
+            const Id sampler_pointer_type =
+                TypePointer(spv::StorageClass::UniformConstant, sampler_type);
+            const Id type = sampler.IsIndexed()
+                                ? TypeArray(sampler_type, Constant(t_uint, sampler.Size()))
+                                : sampler_type;
+            const Id pointer_type = TypePointer(spv::StorageClass::UniformConstant, type);
             const Id id = OpVariable(pointer_type, spv::StorageClass::UniformConstant);
             AddGlobalVariable(Name(id, fmt::format("sampler_{}", sampler.GetIndex())));
             Decorate(id, spv::Decoration::Binding, binding++);
             Decorate(id, spv::Decoration::DescriptorSet, DESCRIPTOR_SET);
 
-            sampled_images.emplace(sampler.GetIndex(),
-                                   SampledImage{image_type, sampled_image_type, id});
+            sampled_images.emplace(sampler.GetIndex(), SampledImage{image_type, sampler_type,
+                                                                    sampler_pointer_type, id});
         }
         return binding;
     }
@@ -852,6 +958,15 @@ private:
         return binding;
     }
 
+    bool IsRenderTargetEnabled(u32 rt) const {
+        for (u32 component = 0; component < 4; ++component) {
+            if (header.ps.IsColorComponentOutputEnabled(rt, component)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool IsInputAttributeArray() const {
         return stage == ShaderType::TesselationControl || stage == ShaderType::TesselationEval ||
                stage == ShaderType::Geometry;
@@ -864,7 +979,7 @@ private:
     u32 GetNumInputVertices() const {
         switch (stage) {
         case ShaderType::Geometry:
-            return GetNumPrimitiveTopologyVertices(specialization.primitive_topology);
+            return GetNumPrimitiveTopologyVertices(registry.GetGraphicsInfo().primitive_topology);
         case ShaderType::TesselationControl:
         case ShaderType::TesselationEval:
             return NumInputPatches;
@@ -902,13 +1017,22 @@ private:
         VertexIndices indices;
         indices.position = AddBuiltIn(t_float4, spv::BuiltIn::Position, "position");
 
+        if (ir.UsesLayer()) {
+            if (stage != ShaderType::Vertex || device.IsExtShaderViewportIndexLayerSupported()) {
+                indices.layer = AddBuiltIn(t_int, spv::BuiltIn::Layer, "layer");
+            } else {
+                LOG_ERROR(
+                    Render_Vulkan,
+                    "Shader requires Layer but it's not supported on this stage with this device.");
+            }
+        }
+
         if (ir.UsesViewportIndex()) {
             if (stage != ShaderType::Vertex || device.IsExtShaderViewportIndexLayerSupported()) {
                 indices.viewport = AddBuiltIn(t_int, spv::BuiltIn::ViewportIndex, "viewport_index");
             } else {
-                LOG_ERROR(Render_Vulkan,
-                          "Shader requires ViewportIndex but it's not supported on this "
-                          "stage with this device.");
+                LOG_ERROR(Render_Vulkan, "Shader requires ViewportIndex but it's not supported on "
+                                         "this stage with this device.");
             }
         }
 
@@ -954,6 +1078,10 @@ private:
 
     Expression Visit(const Node& node) {
         if (const auto operation = std::get_if<OperationNode>(&*node)) {
+            if (const auto amend_index = operation->GetAmendIndex()) {
+                [[maybe_unused]] const Type type = Visit(ir.GetAmendNode(*amend_index)).type;
+                ASSERT(type == Type::Void);
+            }
             const auto operation_index = static_cast<std::size_t>(operation->GetCode());
             const auto decompiler = operation_decompilers[operation_index];
             if (decompiler == nullptr) {
@@ -968,6 +1096,11 @@ private:
                 return {v_float_zero, Type::Float};
             }
             return {OpLoad(t_float, registers.at(index)), Type::Float};
+        }
+
+        if (const auto cv = std::get_if<CustomVarNode>(&*node)) {
+            const u32 index = cv->GetIndex();
+            return {OpLoad(t_float, custom_variables.at(index)), Type::Float};
         }
 
         if (const auto immediate = std::get_if<ImmediateNode>(&*node)) {
@@ -1012,9 +1145,6 @@ private:
             switch (attribute) {
             case Attribute::Index::Position: {
                 if (stage == ShaderType::Fragment) {
-                    if (element == 3) {
-                        return {Constant(t_float, 1.0f), Type::Float};
-                    }
                     return {OpLoad(t_float, AccessElement(t_in_float, frag_coord, element)),
                             Type::Float};
                 }
@@ -1041,9 +1171,12 @@ private:
                     return {OpLoad(t_float, AccessElement(t_in_float, tess_coord, element)),
                             Type::Float};
                 case 2:
-                    return {OpLoad(t_uint, instance_index), Type::Uint};
+                    return {
+                        OpISub(t_int, OpLoad(t_int, instance_index), OpLoad(t_int, base_instance)),
+                        Type::Int};
                 case 3:
-                    return {OpLoad(t_uint, vertex_index), Type::Uint};
+                    return {OpISub(t_int, OpLoad(t_int, vertex_index), OpLoad(t_int, base_vertex)),
+                            Type::Int};
                 }
                 UNIMPLEMENTED_MSG("Unmanaged TessCoordInstanceIDVertexID element={}", element);
                 return {Constant(t_uint, 0U), Type::Uint};
@@ -1111,15 +1244,7 @@ private:
         }
 
         if (const auto gmem = std::get_if<GmemNode>(&*node)) {
-            const Id gmem_buffer = global_buffers.at(gmem->GetDescriptor());
-            const Id real = AsUint(Visit(gmem->GetRealAddress()));
-            const Id base = AsUint(Visit(gmem->GetBaseAddress()));
-
-            Id offset = OpISub(t_uint, real, base);
-            offset = OpUDiv(t_uint, offset, Constant(t_uint, 4U));
-            return {OpLoad(t_float,
-                           OpAccessChain(t_gmem_float, gmem_buffer, Constant(t_uint, 0U), offset)),
-                    Type::Float};
+            return {OpLoad(t_uint, GetGlobalMemoryPointer(*gmem)), Type::Uint};
         }
 
         if (const auto lmem = std::get_if<LmemNode>(&*node)) {
@@ -1130,10 +1255,7 @@ private:
         }
 
         if (const auto smem = std::get_if<SmemNode>(&*node)) {
-            Id address = AsUint(Visit(smem->GetAddress()));
-            address = OpShiftRightLogical(t_uint, address, Constant(t_uint, 2U));
-            const Id pointer = OpAccessChain(t_smem_uint, shared_memory, address);
-            return {OpLoad(t_uint, pointer), Type::Uint};
+            return {OpLoad(t_uint, GetSharedMemoryPointer(*smem)), Type::Uint};
         }
 
         if (const auto internal_flag = std::get_if<InternalFlagNode>(&*node)) {
@@ -1142,6 +1264,10 @@ private:
         }
 
         if (const auto conditional = std::get_if<ConditionalNode>(&*node)) {
+            if (const auto amend_index = conditional->GetAmendIndex()) {
+                [[maybe_unused]] const Type type = Visit(ir.GetAmendNode(*amend_index)).type;
+                ASSERT(type == Type::Void);
+            }
             // It's invalid to call conditional on nested nodes, use an operation instead
             const Id true_label = OpLabel();
             const Id skip_label = OpLabel();
@@ -1265,6 +1391,13 @@ private:
                 }
                 case Attribute::Index::LayerViewportPointSize:
                     switch (element) {
+                    case 1: {
+                        if (!out_indices.layer) {
+                            return {};
+                        }
+                        const u32 index = out_indices.layer.value();
+                        return {AccessElement(t_out_int, out_vertex, index), Type::Int};
+                    }
                     case 2: {
                         if (!out_indices.viewport) {
                             return {};
@@ -1291,8 +1424,14 @@ private:
                 }
                 default:
                     if (IsGenericAttribute(attribute)) {
-                        const Id composite = output_attributes.at(attribute);
-                        return {ArrayPass(t_out_float, composite, {element}), Type::Float};
+                        const u8 offset = static_cast<u8>(static_cast<u8>(attribute) * 4 + element);
+                        const GenericVaryingDescription description = output_attributes.at(offset);
+                        const Id composite = description.id;
+                        std::vector<u32> indices;
+                        if (!description.is_scalar) {
+                            indices.push_back(element - description.first_element);
+                        }
+                        return {ArrayPass(t_out_float, composite, indices), Type::Float};
                     }
                     UNIMPLEMENTED_MSG("Unhandled output attribute: {}",
                                       static_cast<u32>(attribute));
@@ -1323,23 +1462,21 @@ private:
             target = {OpAccessChain(t_prv_float, local_memory, address), Type::Float};
 
         } else if (const auto smem = std::get_if<SmemNode>(&*dest)) {
-            ASSERT(stage == ShaderType::Compute);
-            Id address = AsUint(Visit(smem->GetAddress()));
-            address = OpShiftRightLogical(t_uint, address, Constant(t_uint, 2U));
-            target = {OpAccessChain(t_smem_uint, shared_memory, address), Type::Uint};
+            target = {GetSharedMemoryPointer(*smem), Type::Uint};
 
         } else if (const auto gmem = std::get_if<GmemNode>(&*dest)) {
-            const Id real = AsUint(Visit(gmem->GetRealAddress()));
-            const Id base = AsUint(Visit(gmem->GetBaseAddress()));
-            const Id diff = OpISub(t_uint, real, base);
-            const Id offset = OpShiftRightLogical(t_uint, diff, Constant(t_uint, 2));
+            target = {GetGlobalMemoryPointer(*gmem), Type::Uint};
 
-            const Id gmem_buffer = global_buffers.at(gmem->GetDescriptor());
-            target = {OpAccessChain(t_gmem_float, gmem_buffer, Constant(t_uint, 0), offset),
-                      Type::Float};
+        } else if (const auto cv = std::get_if<CustomVarNode>(&*dest)) {
+            target = {custom_variables.at(cv->GetIndex()), Type::Float};
 
         } else {
             UNIMPLEMENTED();
+        }
+
+        if (!target.id) {
+            // On failure we return a nullptr target.id, skip these stores.
+            return {};
         }
 
         OpStore(target.id, As(Visit(src), target.type));
@@ -1477,7 +1614,12 @@ private:
         ASSERT(!meta.sampler.IsBuffer());
 
         const auto& entry = sampled_images.at(meta.sampler.GetIndex());
-        return OpLoad(entry.sampled_image_type, entry.sampler);
+        Id sampler = entry.variable;
+        if (meta.sampler.IsIndexed()) {
+            const Id index = AsInt(Visit(meta.index));
+            sampler = OpAccessChain(entry.sampler_pointer_type, sampler, index);
+        }
+        return OpLoad(entry.sampler_type, sampler);
     }
 
     Id GetTextureImage(Operation operation) {
@@ -1735,8 +1877,16 @@ private:
     }
 
     Expression ImageLoad(Operation operation) {
-        UNIMPLEMENTED();
-        return {};
+        if (!device.IsFormatlessImageLoadSupported()) {
+            return {v_float_zero, Type::Float};
+        }
+
+        const auto& meta{std::get<MetaImage>(operation.GetMeta())};
+
+        const Id coords = GetCoordinates(operation, Type::Int);
+        const Id texel = OpImageRead(t_uint4, GetImage(operation), coords);
+
+        return {OpCompositeExtract(t_uint, texel, meta.element), Type::Uint};
     }
 
     Expression ImageStore(Operation operation) {
@@ -1785,6 +1935,30 @@ private:
 
     Expression AtomicImageExchange(Operation operation) {
         UNIMPLEMENTED();
+        return {};
+    }
+
+    template <Id (Module::*func)(Id, Id, Id, Id, Id)>
+    Expression Atomic(Operation operation) {
+        Id pointer;
+        if (const auto smem = std::get_if<SmemNode>(&*operation[0])) {
+            pointer = GetSharedMemoryPointer(*smem);
+        } else if (const auto gmem = std::get_if<GmemNode>(&*operation[0])) {
+            pointer = GetGlobalMemoryPointer(*gmem);
+        } else {
+            UNREACHABLE();
+            return {v_float_zero, Type::Float};
+        }
+        const Id scope = Constant(t_uint, static_cast<u32>(spv::Scope::Device));
+        const Id semantics = Constant(t_uint, 0);
+        const Id value = AsUint(Visit(operation[1]));
+
+        return {(this->*func)(t_uint, pointer, scope, semantics, value), Type::Uint};
+    }
+
+    template <Id (Module::*func)(Id, Id, Id, Id, Id)>
+    Expression Reduce(Operation operation) {
+        Atomic<func>(operation);
         return {};
     }
 
@@ -1868,19 +2042,14 @@ private:
             // rendertargets/components are skipped in the register assignment.
             u32 current_reg = 0;
             for (u32 rt = 0; rt < Maxwell::NumRenderTargets; ++rt) {
-                if (!specialization.enabled_rendertargets[rt]) {
-                    // Skip rendertargets that are not enabled
-                    continue;
-                }
                 // TODO(Subv): Figure out how dual-source blending is configured in the Switch.
                 for (u32 component = 0; component < 4; ++component) {
-                    const Id pointer = AccessElement(t_out_float, frag_colors.at(rt), component);
-                    if (header.ps.IsColorComponentOutputEnabled(rt, component)) {
-                        OpStore(pointer, SafeGetRegister(current_reg));
-                        ++current_reg;
-                    } else {
-                        OpStore(pointer, component == 3 ? v_float_one : v_float_zero);
+                    if (!header.ps.IsColorComponentOutputEnabled(rt, component)) {
+                        continue;
                     }
+                    const Id pointer = AccessElement(t_out_float, frag_colors[rt], component);
+                    OpStore(pointer, SafeGetRegister(current_reg));
+                    ++current_reg;
                 }
             }
             if (header.ps.omap.depth) {
@@ -2142,16 +2311,14 @@ private:
         switch (specialization.attribute_types.at(location)) {
         case Maxwell::VertexAttribute::Type::SignedNorm:
         case Maxwell::VertexAttribute::Type::UnsignedNorm:
+        case Maxwell::VertexAttribute::Type::UnsignedScaled:
+        case Maxwell::VertexAttribute::Type::SignedScaled:
         case Maxwell::VertexAttribute::Type::Float:
             return {Type::Float, t_in_float, t_in_float4};
         case Maxwell::VertexAttribute::Type::SignedInt:
             return {Type::Int, t_in_int, t_in_int4};
         case Maxwell::VertexAttribute::Type::UnsignedInt:
             return {Type::Uint, t_in_uint, t_in_uint4};
-        case Maxwell::VertexAttribute::Type::UnsignedScaled:
-        case Maxwell::VertexAttribute::Type::SignedScaled:
-            UNIMPLEMENTED();
-            return {Type::Float, t_in_float, t_in_float4};
         default:
             UNREACHABLE();
             return {Type::Float, t_in_float, t_in_float4};
@@ -2181,11 +2348,11 @@ private:
     std::array<Id, 4> GetTypeVectorDefinitionLut(Type type) const {
         switch (type) {
         case Type::Float:
-            return {nullptr, t_float2, t_float3, t_float4};
+            return {t_float, t_float2, t_float3, t_float4};
         case Type::Int:
-            return {nullptr, t_int2, t_int3, t_int4};
+            return {t_int, t_int2, t_int3, t_int4};
         case Type::Uint:
-            return {nullptr, t_uint2, t_uint3, t_uint4};
+            return {t_uint, t_uint2, t_uint3, t_uint4};
         default:
             UNIMPLEMENTED();
             return {};
@@ -2217,6 +2384,22 @@ private:
         }
         UNREACHABLE();
         return {};
+    }
+
+    Id GetGlobalMemoryPointer(const GmemNode& gmem) {
+        const Id real = AsUint(Visit(gmem.GetRealAddress()));
+        const Id base = AsUint(Visit(gmem.GetBaseAddress()));
+        const Id diff = OpISub(t_uint, real, base);
+        const Id offset = OpShiftRightLogical(t_uint, diff, Constant(t_uint, 2));
+        const Id buffer = global_buffers.at(gmem.GetDescriptor());
+        return OpAccessChain(t_gmem_uint, buffer, Constant(t_uint, 0), offset);
+    }
+
+    Id GetSharedMemoryPointer(const SmemNode& smem) {
+        ASSERT(stage == ShaderType::Compute);
+        Id address = AsUint(Visit(smem.GetAddress()));
+        address = OpShiftRightLogical(t_uint, address, Constant(t_uint, 2U));
+        return OpAccessChain(t_smem_uint, shared_memory, address);
     }
 
     static constexpr std::array operation_decompilers = {
@@ -2365,6 +2548,36 @@ private:
         &SPIRVDecompiler::AtomicImageXor,
         &SPIRVDecompiler::AtomicImageExchange,
 
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicExchange>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicIAdd>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicUMin>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicUMax>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicAnd>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicOr>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicXor>,
+
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicExchange>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicIAdd>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicSMin>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicSMax>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicAnd>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicOr>,
+        &SPIRVDecompiler::Atomic<&Module::OpAtomicXor>,
+
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicIAdd>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicUMin>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicUMax>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicAnd>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicOr>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicXor>,
+
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicIAdd>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicSMin>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicSMax>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicAnd>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicOr>,
+        &SPIRVDecompiler::Reduce<&Module::OpAtomicXor>,
+
         &SPIRVDecompiler::Branch,
         &SPIRVDecompiler::BranchIndirect,
         &SPIRVDecompiler::PushFlowStack,
@@ -2400,7 +2613,9 @@ private:
     const ShaderIR& ir;
     const ShaderType stage;
     const Tegra::Shader::Header header;
+    const Registry& registry;
     const Specialization& specialization;
+    std::unordered_map<u8, VaryingTFB> transform_feedback;
 
     const Id t_void = Name(TypeVoid(), "void");
 
@@ -2459,9 +2674,9 @@ private:
 
     Id t_smem_uint{};
 
-    const Id t_gmem_float = TypePointer(spv::StorageClass::StorageBuffer, t_float);
+    const Id t_gmem_uint = TypePointer(spv::StorageClass::StorageBuffer, t_uint);
     const Id t_gmem_array =
-        Name(Decorate(TypeRuntimeArray(t_float), spv::Decoration::ArrayStride, 4U), "GmemArray");
+        Name(Decorate(TypeRuntimeArray(t_uint), spv::Decoration::ArrayStride, 4U), "GmemArray");
     const Id t_gmem_struct = MemberDecorate(
         Decorate(TypeStruct(t_gmem_array), spv::Decoration::Block), 0, spv::Decoration::Offset, 0);
     const Id t_gmem_ssbo = TypePointer(spv::StorageClass::StorageBuffer, t_gmem_struct);
@@ -2482,13 +2697,14 @@ private:
     Id out_vertex{};
     Id in_vertex{};
     std::map<u32, Id> registers;
+    std::map<u32, Id> custom_variables;
     std::map<Tegra::Shader::Pred, Id> predicates;
     std::map<u32, Id> flow_variables;
     Id local_memory{};
     Id shared_memory{};
     std::array<Id, INTERNAL_FLAGS_COUNT> internal_flags{};
     std::map<Attribute::Index, Id> input_attributes;
-    std::map<Attribute::Index, Id> output_attributes;
+    std::unordered_map<u8, GenericVaryingDescription> output_attributes;
     std::map<u32, Id> constant_buffers;
     std::map<GlobalMemoryBase, Id> global_buffers;
     std::map<u32, TexelBuffer> texel_buffers;
@@ -2497,6 +2713,8 @@ private:
 
     Id instance_index{};
     Id vertex_index{};
+    Id base_instance{};
+    Id base_vertex{};
     std::array<Id, Maxwell::NumRenderTargets> frag_colors{};
     Id frag_depth{};
     Id frag_coord{};
@@ -2772,8 +2990,9 @@ ShaderEntries GenerateShaderEntries(const VideoCommon::Shader::ShaderIR& ir) {
 }
 
 std::vector<u32> Decompile(const VKDevice& device, const VideoCommon::Shader::ShaderIR& ir,
-                           ShaderType stage, const Specialization& specialization) {
-    return SPIRVDecompiler(device, ir, stage, specialization).Assemble();
+                           ShaderType stage, const VideoCommon::Shader::Registry& registry,
+                           const Specialization& specialization) {
+    return SPIRVDecompiler(device, ir, stage, registry, specialization).Assemble();
 }
 
 } // namespace Vulkan

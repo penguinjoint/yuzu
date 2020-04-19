@@ -35,11 +35,11 @@
 #include "common/swap.h"
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
-#include "core/core_cpu.h"
+#include "core/core_manager.h"
 #include "core/gdbstub/gdbstub.h"
+#include "core/hle/kernel/memory/page_table.h"
 #include "core/hle/kernel/process.h"
 #include "core/hle/kernel/scheduler.h"
-#include "core/hle/kernel/vm_manager.h"
 #include "core/loader/loader.h"
 #include "core/memory.h"
 
@@ -141,6 +141,7 @@ constexpr char target_xml[] =
 )";
 
 int gdbserver_socket = -1;
+bool defer_start = false;
 
 u8 command_buffer[GDB_BUFFER_SIZE];
 u32 command_length;
@@ -217,7 +218,7 @@ static u64 RegRead(std::size_t id, Kernel::Thread* thread = nullptr) {
         return 0;
     }
 
-    const auto& thread_context = thread->GetContext();
+    const auto& thread_context = thread->GetContext64();
 
     if (id < SP_REGISTER) {
         return thread_context.cpu_registers[id];
@@ -239,7 +240,7 @@ static void RegWrite(std::size_t id, u64 val, Kernel::Thread* thread = nullptr) 
         return;
     }
 
-    auto& thread_context = thread->GetContext();
+    auto& thread_context = thread->GetContext64();
 
     if (id < SP_REGISTER) {
         thread_context.cpu_registers[id] = val;
@@ -259,7 +260,7 @@ static u128 FpuRead(std::size_t id, Kernel::Thread* thread = nullptr) {
         return u128{0};
     }
 
-    auto& thread_context = thread->GetContext();
+    auto& thread_context = thread->GetContext64();
 
     if (id >= UC_ARM64_REG_Q0 && id < FPCR_REGISTER) {
         return thread_context.vector_registers[id - UC_ARM64_REG_Q0];
@@ -275,7 +276,7 @@ static void FpuWrite(std::size_t id, u128 val, Kernel::Thread* thread = nullptr)
         return;
     }
 
-    auto& thread_context = thread->GetContext();
+    auto& thread_context = thread->GetContext64();
 
     if (id >= UC_ARM64_REG_Q0 && id < FPCR_REGISTER) {
         thread_context.vector_registers[id - UC_ARM64_REG_Q0] = val;
@@ -642,7 +643,7 @@ static void HandleQuery() {
         SendReply(target_xml);
     } else if (strncmp(query, "Offsets", strlen("Offsets")) == 0) {
         const VAddr base_address =
-            Core::System::GetInstance().CurrentProcess()->VMManager().GetCodeRegionBaseAddress();
+            Core::System::GetInstance().CurrentProcess()->PageTable().GetCodeRegionStart();
         std::string buffer = fmt::format("TextSeg={:0x}", base_address);
         SendReply(buffer.c_str());
     } else if (strncmp(query, "fThreadInfo", strlen("fThreadInfo")) == 0) {
@@ -916,7 +917,7 @@ static void WriteRegister() {
     // Update ARM context, skipping scheduler - no running threads at this point
     Core::System::GetInstance()
         .ArmInterface(current_core)
-        .LoadContext(current_thread->GetContext());
+        .LoadContext(current_thread->GetContext64());
 
     SendReply("OK");
 }
@@ -947,7 +948,7 @@ static void WriteRegisters() {
     // Update ARM context, skipping scheduler - no running threads at this point
     Core::System::GetInstance()
         .ArmInterface(current_core)
-        .LoadContext(current_thread->GetContext());
+        .LoadContext(current_thread->GetContext64());
 
     SendReply("OK");
 }
@@ -1019,7 +1020,7 @@ static void Step() {
         // Update ARM context, skipping scheduler - no running threads at this point
         Core::System::GetInstance()
             .ArmInterface(current_core)
-            .LoadContext(current_thread->GetContext());
+            .LoadContext(current_thread->GetContext64());
     }
     step_loop = true;
     halt_loop = true;
@@ -1166,6 +1167,9 @@ static void RemoveBreakpoint() {
 
 void HandlePacket() {
     if (!IsConnected()) {
+        if (defer_start) {
+            ToggleServer(true);
+        }
         return;
     }
 
@@ -1256,6 +1260,10 @@ void ToggleServer(bool status) {
     }
 }
 
+void DeferStart() {
+    defer_start = true;
+}
+
 static void Init(u16 port) {
     if (!server_enabled) {
         // Set the halt loop to false in case the user enabled the gdbstub mid-execution.
@@ -1341,6 +1349,7 @@ void Shutdown() {
     if (!server_enabled) {
         return;
     }
+    defer_start = false;
 
     LOG_INFO(Debug_GDBStub, "Stopping GDB ...");
     if (gdbserver_socket != -1) {

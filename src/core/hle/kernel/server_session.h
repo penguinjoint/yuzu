@@ -10,10 +10,10 @@
 #include <vector>
 
 #include "common/threadsafe_queue.h"
-#include "core/hle/kernel/wait_object.h"
+#include "core/hle/kernel/synchronization_object.h"
 #include "core/hle/result.h"
 
-namespace Memory {
+namespace Core::Memory {
 class Memory;
 }
 
@@ -41,7 +41,7 @@ class Thread;
  * After the server replies to the request, the response is marshalled back to the caller's
  * TLS buffer and control is transferred back to it.
  */
-class ServerSession final : public WaitObject {
+class ServerSession final : public SynchronizationObject {
 public:
     explicit ServerSession(KernelCore& kernel);
     ~ServerSession() override;
@@ -73,6 +73,8 @@ public:
         return parent.get();
     }
 
+    bool IsSignaled() const override;
+
     /**
      * Sets the HLE handler for the session. This handler will be called to service IPC requests
      * instead of the regular IPC machinery. (The regular IPC machinery is currently not
@@ -90,7 +92,7 @@ public:
      *
      * @returns ResultCode from the operation.
      */
-    ResultCode HandleSyncRequest(std::shared_ptr<Thread> thread, Memory::Memory& memory);
+    ResultCode HandleSyncRequest(std::shared_ptr<Thread> thread, Core::Memory::Memory& memory);
 
     bool ShouldWait(const Thread* thread) const override;
 
@@ -124,7 +126,7 @@ public:
 
 private:
     /// Queues a sync request from the emulated application.
-    ResultCode QueueSyncRequest(std::shared_ptr<Thread> thread, Memory::Memory& memory);
+    ResultCode QueueSyncRequest(std::shared_ptr<Thread> thread, Core::Memory::Memory& memory);
 
     /// Completes a sync request from the emulated application.
     ResultCode CompleteSyncRequest();

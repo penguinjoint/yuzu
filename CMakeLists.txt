@@ -151,15 +151,22 @@ if (ENABLE_SDL2)
         set(SDL2_INCLUDE_DIR "${SDL2_PREFIX}/include" CACHE PATH "Path to SDL2 headers")
         set(SDL2_LIBRARY "${SDL2_PREFIX}/lib/x64/SDL2.lib" CACHE PATH "Path to SDL2 library")
         set(SDL2_DLL_DIR "${SDL2_PREFIX}/lib/x64/" CACHE PATH "Path to SDL2.dll")
-    else()
-        find_package(SDL2 REQUIRED)
-    endif()
 
-    if (SDL2_FOUND)
-        # TODO(yuriks): Make FindSDL2.cmake export an IMPORTED library instead
         add_library(SDL2 INTERFACE)
         target_link_libraries(SDL2 INTERFACE "${SDL2_LIBRARY}")
         target_include_directories(SDL2 INTERFACE "${SDL2_INCLUDE_DIR}")
+    else()
+        find_package(SDL2 REQUIRED)
+
+        # Some installations don't set SDL2_LIBRARIES
+        if("${SDL2_LIBRARIES}" STREQUAL "")
+            message(WARNING "SDL2_LIBRARIES wasn't set, manually setting to SDL2::SDL2")
+            set(SDL2_LIBRARIES "SDL2::SDL2")
+        endif()
+
+        include_directories(SYSTEM ${SDL2_INCLUDE_DIRS})
+        add_library(SDL2 INTERFACE)
+        target_link_libraries(SDL2 INTERFACE "${SDL2_LIBRARIES}")
     endif()
 else()
     set(SDL2_FOUND NO)
@@ -349,6 +356,13 @@ function(create_target_directory_groups target_name)
         source_group("${group_name}" FILES "${file_name}")
     endforeach()
 endfunction()
+
+# Prevent boost from linking against libs when building
+add_definitions(-DBOOST_ERROR_CODE_HEADER_ONLY
+    -DBOOST_SYSTEM_NO_LIB
+    -DBOOST_DATE_TIME_NO_LIB
+    -DBOOST_REGEX_NO_LIB
+)
 
 enable_testing()
 add_subdirectory(externals)

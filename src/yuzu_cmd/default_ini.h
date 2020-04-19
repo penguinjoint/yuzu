@@ -69,11 +69,28 @@ rstick=
 #  - "motion_emu" (default) for emulating motion input from mouse input. Required parameters:
 #      - "update_period": update period in milliseconds (default to 100)
 #      - "sensitivity": the coefficient converting mouse movement to tilting angle (default to 0.01)
+#  - "cemuhookudp" reads motion input from a udp server that uses cemuhook's udp protocol
 motion_device=
 
 # for touch input, the following devices are available:
 #  - "emu_window" (default) for emulating touch input from mouse input to the emulation window. No parameters required
+#  - "cemuhookudp" reads touch input from a udp server that uses cemuhook's udp protocol
+#      - "min_x", "min_y", "max_x", "max_y": defines the udp device's touch screen coordinate system
 touch_device=
+
+# Most desktop operating systems do not expose a way to poll the motion state of the controllers
+# so as a way around it, cemuhook created a udp client/server protocol to broadcast the data directly
+# from a controller device to the client program. Citra has a client that can connect and read
+# from any cemuhook compatible motion program.
+
+# IPv4 address of the udp input server (Default "127.0.0.1")
+udp_input_address=127.0.0.1
+
+# Port of the udp input server. (Default 26760)
+udp_input_port=
+
+# The pad to request data on. Should be between 0 (Pad 1) and 3 (Pad 4). (Default 0)
+udp_pad_index=
 
 [Core]
 # Whether to use multi-core for CPU emulation
@@ -81,6 +98,17 @@ touch_device=
 use_multi_core=
 
 [Renderer]
+# Which backend API to use.
+# 0 (default): OpenGL, 1: Vulkan
+backend =
+
+# Enable graphics API debugging mode.
+# 0 (default): Disabled, 1: Enabled
+debug =
+
+# Which Vulkan physical device to use (defaults to 0)
+vulkan_device =
+
 # Whether to use software or hardware rendering.
 # 0: Software, 1 (default): Hardware
 use_hw_renderer =
@@ -93,6 +121,14 @@ use_shader_jit =
 # 0: Auto (scales resolution to window size), 1: Native Switch screen resolution, Otherwise a scale
 # factor for the Switch resolution
 resolution_factor =
+
+# Aspect ratio
+# 0: Default (16:9), 1: Force 4:3, 2: Force 21:9, 3: Stretch to Window
+aspect_ratio =
+
+# Anisotropic filtering
+# 0: Default, 1: 2x, 2: 4x, 3: 8x, 4: 16x
+max_anisotropy =
 
 # Whether to enable V-Sync (caps the framerate at 60FPS) or not.
 # 0 (default): Off, 1: On
@@ -117,6 +153,11 @@ use_accurate_gpu_emulation =
 # Whether to use asynchronous GPU emulation
 # 0 : Off (slow), 1 (default): On (fast)
 use_asynchronous_gpu_emulation =
+
+# Forces VSync on the display thread. Usually doesn't impact performance, but on some drivers it can
+# so only turn this off if you notice a speed difference.
+# 0: Off, 1 (default): On
+use_vsync =
 
 # The clear color for the renderer. What shows up on the sides of the bottom screen.
 # Must be in range of 0.0-1.0. Defaults to 1.0 for all.

@@ -243,6 +243,7 @@ typedef uint32_t ThreadIdType;
 #define MICROPROFILE_DEFINE_GPU(var, name, color) MicroProfileToken g_mp_##var = MicroProfileGetToken("GPU", name, color, MicroProfileTokenTypeGpu)
 #define MICROPROFILE_TOKEN_PASTE0(a, b) a ## b
 #define MICROPROFILE_TOKEN_PASTE(a, b)  MICROPROFILE_TOKEN_PASTE0(a,b)
+#define MICROPROFILE_TOKEN(var) g_mp_##var
 #define MICROPROFILE_SCOPE(var) MicroProfileScopeHandler MICROPROFILE_TOKEN_PASTE(foo, __LINE__)(g_mp_##var)
 #define MICROPROFILE_SCOPE_TOKEN(token) MicroProfileScopeHandler MICROPROFILE_TOKEN_PASTE(foo, __LINE__)(token)
 #define MICROPROFILE_SCOPEI(group, name, color) static MicroProfileToken MICROPROFILE_TOKEN_PASTE(g_mp,__LINE__) = MicroProfileGetToken(group, name, color, MicroProfileTokenTypeCpu); MicroProfileScopeHandler MICROPROFILE_TOKEN_PASTE(foo,__LINE__)( MICROPROFILE_TOKEN_PASTE(g_mp,__LINE__))
@@ -827,7 +828,7 @@ inline MicroProfileLogEntry MicroProfileMakeLogIndex(uint64_t nBegin, MicroProfi
     MicroProfileLogEntry Entry =  (nBegin<<62) | ((0x3fff&nToken)<<48) | (MP_LOG_TICK_MASK&nTick);
     int t = MicroProfileLogType(Entry);
     uint64_t nTimerIndex = MicroProfileLogTimerIndex(Entry);
-    MP_ASSERT(t == nBegin);
+    MP_ASSERT((uint64_t)t == nBegin);
     MP_ASSERT(nTimerIndex == (nToken&0x3fff));
     return Entry;
 
@@ -1555,10 +1556,10 @@ void MicroProfileFlip()
 
         pFramePut->nFrameStartCpu = MP_TICK();
         pFramePut->nFrameStartGpu = (uint32_t)MicroProfileGpuInsertTimeStamp();
-        if(pFrameNext->nFrameStartGpu != (uint64_t)-1)
+        if(pFrameNext->nFrameStartGpu != -1)
             pFrameNext->nFrameStartGpu = MicroProfileGpuGetTimeStamp((uint32_t)pFrameNext->nFrameStartGpu);
 
-        if(pFrameCurrent->nFrameStartGpu == (uint64_t)-1)
+        if(pFrameCurrent->nFrameStartGpu == -1)
             pFrameCurrent->nFrameStartGpu = pFrameNext->nFrameStartGpu + 1;
 
         uint64_t nFrameStartCpu = pFrameCurrent->nFrameStartCpu;

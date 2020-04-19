@@ -12,23 +12,49 @@
 
 namespace Core::Frontend {
 
+/// Information for the Graphics Backends signifying what type of screen pointer is in
+/// WindowInformation
+enum class WindowSystemType {
+    Headless,
+    Windows,
+    X11,
+    Wayland,
+};
+
 /**
- * Represents a graphics context that can be used for background computation or drawing. If the
- * graphics backend doesn't require the context, then the implementation of these methods can be
- * stubs
+ * Represents a drawing context that supports graphics operations.
  */
 class GraphicsContext {
 public:
     virtual ~GraphicsContext();
 
+    /// Inform the driver to swap the front/back buffers and present the current image
+    virtual void SwapBuffers() {}
+
     /// Makes the graphics context current for the caller thread
-    virtual void MakeCurrent() = 0;
+    virtual void MakeCurrent() {}
 
     /// Releases (dunno if this is the "right" word) the context from the caller thread
-    virtual void DoneCurrent() = 0;
+    virtual void DoneCurrent() {}
 
-    /// Swap buffers to display the next frame
-    virtual void SwapBuffers() = 0;
+    class Scoped {
+    public:
+        explicit Scoped(GraphicsContext& context_) : context(context_) {
+            context.MakeCurrent();
+        }
+        ~Scoped() {
+            context.DoneCurrent();
+        }
+
+    private:
+        GraphicsContext& context;
+    };
+
+    /// Calls MakeCurrent on the context and calls DoneCurrent when the scope for the returned value
+    /// ends
+    Scoped Acquire() {
+        return Scoped{*this};
+    }
 };
 
 /**
@@ -49,7 +75,7 @@ public:
  * - DO NOT TREAT THIS CLASS AS A GUI TOOLKIT ABSTRACTION LAYER. That's not what it is. Please
  *   re-read the upper points again and think about it if you don't see this.
  */
-class EmuWindow : public GraphicsContext {
+class EmuWindow {
 public:
     /// Data structure to store emuwindow configuration
     struct WindowConfig {
@@ -59,21 +85,33 @@ public:
         std::pair<unsigned, unsigned> min_client_area_size;
     };
 
+    /// Data describing host window system information
+    struct WindowSystemInfo {
+        // Window system type. Determines which GL context or Vulkan WSI is used.
+        WindowSystemType type = WindowSystemType::Headless;
+
+        // Connection to a display server. This is used on X11 and Wayland platforms.
+        void* display_connection = nullptr;
+
+        // Render surface. This is a pointer to the native window handle, which depends
+        // on the platform. e.g. HWND for Windows, Window for X11. If the surface is
+        // set to nullptr, the video backend will run in headless mode.
+        void* render_surface = nullptr;
+
+        // Scale of the render surface. For hidpi systems, this will be >1.
+        float render_surface_scale = 1.0f;
+    };
+
     /// Polls window events
     virtual void PollEvents() = 0;
 
     /**
-     * Returns a GraphicsContext that the frontend provides that is shared with the emu window. This
-     * context can be used from other threads for background graphics computation. If the frontend
-     * is using a graphics backend that doesn't need anything specific to run on a different thread,
-     * then it can use a stubbed implemenation for GraphicsContext.
-     *
-     * If the return value is null, then the core should assume that the frontend cannot provide a
-     * Shared Context
+     * Returns a GraphicsContext that the frontend provides to be used for rendering.
      */
-    virtual std::unique_ptr<GraphicsContext> CreateSharedContext() const {
-        return nullptr;
-    }
+    virtual std::unique_ptr<GraphicsContext> CreateSharedContext() const = 0;
+
+    /// Returns if window is shown (not minimized)
+    virtual bool IsShown() const = 0;
 
     /**
      * Signal that a touch pressed event has occurred (e.g. mouse click pressed)
@@ -112,6 +150,13 @@ public:
     }
 
     /**
+     * Returns system information about the drawing area.
+     */
+    const WindowSystemInfo& GetWindowInfo() const {
+        return window_info;
+    }
+
+    /**
      * Gets the framebuffer layout (width, height, and screen regions)
      * @note This method is thread-safe
      */
@@ -126,7 +171,7 @@ public:
     void UpdateCurrentFramebufferLayout(unsigned width, unsigned height);
 
 protected:
-    EmuWindow();
+    explicit EmuWindow();
     virtual ~EmuWindow();
 
     /**
@@ -162,6 +207,8 @@ protected:
         client_area_width = size.first;
         client_area_height = size.second;
     }
+
+    WindowSystemInfo window_info;
 
 private:
     /**

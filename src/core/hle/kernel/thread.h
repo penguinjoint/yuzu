@@ -11,7 +11,7 @@
 #include "common/common_types.h"
 #include "core/arm/arm_interface.h"
 #include "core/hle/kernel/object.h"
-#include "core/hle/kernel/wait_object.h"
+#include "core/hle/kernel/synchronization_object.h"
 #include "core/hle/result.h"
 
 namespace Kernel {
@@ -95,20 +95,21 @@ enum class ThreadSchedMasks : u32 {
     ForcePauseMask = 0x0070,
 };
 
-class Thread final : public WaitObject {
+class Thread final : public SynchronizationObject {
 public:
     explicit Thread(KernelCore& kernel);
     ~Thread() override;
 
     using MutexWaitingThreads = std::vector<std::shared_ptr<Thread>>;
 
-    using ThreadContext = Core::ARM_Interface::ThreadContext;
+    using ThreadContext32 = Core::ARM_Interface::ThreadContext32;
+    using ThreadContext64 = Core::ARM_Interface::ThreadContext64;
 
-    using ThreadWaitObjects = std::vector<std::shared_ptr<WaitObject>>;
+    using ThreadSynchronizationObjects = std::vector<std::shared_ptr<SynchronizationObject>>;
 
     using WakeupCallback =
         std::function<bool(ThreadWakeupReason reason, std::shared_ptr<Thread> thread,
-                           std::shared_ptr<WaitObject> object, std::size_t index)>;
+                           std::shared_ptr<SynchronizationObject> object, std::size_t index)>;
 
     /**
      * Creates and returns a new thread. The new thread is immediately scheduled
@@ -146,6 +147,7 @@ public:
 
     bool ShouldWait(const Thread* thread) const override;
     void Acquire(Thread* thread) override;
+    bool IsSignaled() const override;
 
     /**
      * Gets the thread's current priority
@@ -233,7 +235,7 @@ public:
      *
      * @param object Object to query the index of.
      */
-    s32 GetWaitObjectIndex(std::shared_ptr<WaitObject> object) const;
+    s32 GetSynchronizationObjectIndex(std::shared_ptr<SynchronizationObject> object) const;
 
     /**
      * Stops a thread, invalidating it from further use
@@ -272,12 +274,20 @@ public:
         return status == ThreadStatus::WaitSynch;
     }
 
-    ThreadContext& GetContext() {
-        return context;
+    ThreadContext32& GetContext32() {
+        return context_32;
     }
 
-    const ThreadContext& GetContext() const {
-        return context;
+    const ThreadContext32& GetContext32() const {
+        return context_32;
+    }
+
+    ThreadContext64& GetContext64() {
+        return context_64;
+    }
+
+    const ThreadContext64& GetContext64() const {
+        return context_64;
     }
 
     ThreadStatus GetStatus() const {
@@ -314,15 +324,15 @@ public:
         return owner_process;
     }
 
-    const ThreadWaitObjects& GetWaitObjects() const {
+    const ThreadSynchronizationObjects& GetSynchronizationObjects() const {
         return wait_objects;
     }
 
-    void SetWaitObjects(ThreadWaitObjects objects) {
+    void SetSynchronizationObjects(ThreadSynchronizationObjects objects) {
         wait_objects = std::move(objects);
     }
 
-    void ClearWaitObjects() {
+    void ClearSynchronizationObjects() {
         for (const auto& waiting_object : wait_objects) {
             waiting_object->RemoveWaitingThread(SharedFrom(this));
         }
@@ -330,7 +340,7 @@ public:
     }
 
     /// Determines whether all the objects this thread is waiting on are ready.
-    bool AllWaitObjectsReady() const;
+    bool AllSynchronizationObjectsReady() const;
 
     const MutexWaitingThreads& GetMutexWaitingThreads() const {
         return wait_mutex_threads;
@@ -395,7 +405,7 @@ public:
      *      will cause an assertion to trigger.
      */
     bool InvokeWakeupCallback(ThreadWakeupReason reason, std::shared_ptr<Thread> thread,
-                              std::shared_ptr<WaitObject> object, std::size_t index);
+                              std::shared_ptr<SynchronizationObject> object, std::size_t index);
 
     u32 GetIdealCore() const {
         return ideal_core;
@@ -452,6 +462,10 @@ public:
         is_sync_cancelled = value;
     }
 
+    Handle GetGlobalHandle() const {
+        return global_handle;
+    }
+
 private:
     void SetSchedulingStatus(ThreadSchedStatus new_status);
     void SetCurrentPriority(u32 new_priority);
@@ -461,7 +475,8 @@ private:
     void AdjustSchedulingOnPriority(u32 old_priority);
     void AdjustSchedulingOnAffinity(u64 old_affinity_mask, s32 old_core);
 
-    Core::ARM_Interface::ThreadContext context{};
+    ThreadContext32 context_32{};
+    ThreadContext64 context_64{};
 
     u64 thread_id = 0;
 
@@ -494,7 +509,7 @@ private:
 
     /// Objects that the thread is waiting on, in the same order as they were
     /// passed to WaitSynchronization.
-    ThreadWaitObjects wait_objects;
+    ThreadSynchronizationObjects wait_objects;
 
     /// List of threads that are waiting for a mutex that is held by this thread.
     MutexWaitingThreads wait_mutex_threads;
@@ -513,7 +528,7 @@ private:
     VAddr arb_wait_address{0};
 
     /// Handle used as userdata to reference this object when inserting into the CoreTiming queue.
-    Handle callback_handle = 0;
+    Handle global_handle = 0;
 
     /// Callback that will be invoked when the thread is resumed from a waiting state. If the thread
     /// was waiting via WaitSynchronization then the object will be the last object that became

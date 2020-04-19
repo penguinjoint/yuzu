@@ -12,6 +12,7 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "core/core_timing_util.h"
+#include "core/hardware_properties.h"
 #include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/readable_event.h"
 #include "core/hle/service/nvdrv/devices/nvdisp_disp0.h"
@@ -26,8 +27,8 @@
 
 namespace Service::NVFlinger {
 
-constexpr s64 frame_ticks = static_cast<s64>(Core::Timing::BASE_CLOCK_RATE / 60);
-constexpr s64 frame_ticks_30fps = static_cast<s64>(Core::Timing::BASE_CLOCK_RATE / 30);
+constexpr s64 frame_ticks = static_cast<s64>(Core::Hardware::BASE_CLOCK_RATE / 60);
+constexpr s64 frame_ticks_30fps = static_cast<s64>(Core::Hardware::BASE_CLOCK_RATE / 30);
 
 NVFlinger::NVFlinger(Core::System& system) : system(system) {
     displays.emplace_back(0, "Default", system);
@@ -86,6 +87,12 @@ std::optional<u64> NVFlinger::CreateLayer(u64 display_id) {
     buffer_queues.emplace_back(system.Kernel(), buffer_queue_id, layer_id);
     display->CreateLayer(layer_id, buffer_queues.back());
     return layer_id;
+}
+
+void NVFlinger::CloseLayer(u64 layer_id) {
+    for (auto& display : displays) {
+        display.CloseLayer(layer_id);
+    }
 }
 
 std::optional<u32> NVFlinger::FindBufferQueueId(u64 display_id, u64 layer_id) const {
@@ -184,20 +191,20 @@ void NVFlinger::Compose() {
         // Search for a queued buffer and acquire it
         auto buffer = buffer_queue.AcquireBuffer();
 
-        MicroProfileFlip();
-
         if (!buffer) {
             continue;
         }
 
         const auto& igbp_buffer = buffer->get().igbp_buffer;
 
-        const auto& gpu = system.GPU();
+        auto& gpu = system.GPU();
         const auto& multi_fence = buffer->get().multi_fence;
         for (u32 fence_id = 0; fence_id < multi_fence.num_fences; fence_id++) {
             const auto& fence = multi_fence.fences[fence_id];
             gpu.WaitFence(fence.id, fence.value);
         }
+
+        MicroProfileFlip();
 
         // Now send the buffer to the GPU for drawing.
         // TODO(Subv): Support more than just disp0. The display device selection is probably based
@@ -216,7 +223,7 @@ void NVFlinger::Compose() {
 
 s64 NVFlinger::GetNextTicks() const {
     constexpr s64 max_hertz = 120LL;
-    return (Core::Timing::BASE_CLOCK_RATE * (1LL << swap_interval)) / max_hertz;
+    return (Core::Hardware::BASE_CLOCK_RATE * (1LL << swap_interval)) / max_hertz;
 }
 
 } // namespace Service::NVFlinger

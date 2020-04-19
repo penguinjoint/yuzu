@@ -11,11 +11,16 @@
 
 namespace VideoCommon::Shader {
 
+using std::move;
 using Tegra::Shader::ConditionCode;
 using Tegra::Shader::Instruction;
+using Tegra::Shader::IpaInterpMode;
 using Tegra::Shader::OpCode;
+using Tegra::Shader::PixelImap;
 using Tegra::Shader::Register;
 using Tegra::Shader::SystemVariable;
+
+using Index = Tegra::Shader::Attribute::Index;
 
 u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
     const Instruction instr = {program_code[pc]};
@@ -66,16 +71,25 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
         bb.push_back(Operation(OperationCode::Discard));
         break;
     }
-    case OpCode::Id::MOV_SYS: {
+    case OpCode::Id::S2R: {
         const Node value = [this, instr] {
             switch (instr.sys20) {
+            case SystemVariable::LaneId:
+                LOG_WARNING(HW_GPU, "S2R instruction with LaneId is incomplete");
+                return Immediate(0U);
             case SystemVariable::InvocationId:
                 return Operation(OperationCode::InvocationId);
             case SystemVariable::Ydirection:
                 return Operation(OperationCode::YNegate);
             case SystemVariable::InvocationInfo:
-                LOG_WARNING(HW_GPU, "MOV_SYS instruction with InvocationInfo is incomplete");
-                return Immediate(0u);
+                LOG_WARNING(HW_GPU, "S2R instruction with InvocationInfo is incomplete");
+                return Immediate(0U);
+            case SystemVariable::WscaleFactorXY:
+                UNIMPLEMENTED_MSG("S2R WscaleFactorXY is not implemented");
+                return Immediate(0U);
+            case SystemVariable::WscaleFactorZ:
+                UNIMPLEMENTED_MSG("S2R WscaleFactorZ is not implemented");
+                return Immediate(0U);
             case SystemVariable::Tid: {
                 Node value = Immediate(0);
                 value = BitfieldInsert(value, Operation(OperationCode::LocalInvocationIdX), 0, 9);
@@ -188,7 +202,7 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
         UNIMPLEMENTED_IF_MSG(cc != Tegra::Shader::ConditionCode::T, "SYNC condition code used: {}",
                              static_cast<u32>(cc));
 
-        if (disable_flow_stack) {
+        if (decompiled) {
             break;
         }
 
@@ -200,7 +214,7 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
         const Tegra::Shader::ConditionCode cc = instr.flow_condition_code;
         UNIMPLEMENTED_IF_MSG(cc != Tegra::Shader::ConditionCode::T, "BRK condition code used: {}",
                              static_cast<u32>(cc));
-        if (disable_flow_stack) {
+        if (decompiled) {
             break;
         }
 
@@ -210,27 +224,28 @@ u32 ShaderIR::DecodeOther(NodeBlock& bb, u32 pc) {
     }
     case OpCode::Id::IPA: {
         const bool is_physical = instr.ipa.idx && instr.gpr8.Value() != 0xff;
-
         const auto attribute = instr.attribute.fmt28;
-        const Tegra::Shader::IpaMode input_mode{instr.ipa.interp_mode.Value(),
-                                                instr.ipa.sample_mode.Value()};
+        const Index index = attribute.index;
 
         Node value = is_physical ? GetPhysicalInputAttribute(instr.gpr8)
-                                 : GetInputAttribute(attribute.index, attribute.element);
-        const Tegra::Shader::Attribute::Index index = attribute.index.Value();
-        const bool is_generic = index >= Tegra::Shader::Attribute::Index::Attribute_0 &&
-                                index <= Tegra::Shader::Attribute::Index::Attribute_31;
-        if (is_generic || is_physical) {
-            // TODO(Blinkhawk): There are cases where a perspective attribute use PASS.
-            // In theory by setting them as perspective, OpenGL does the perspective correction.
-            // A way must figured to reverse the last step of it.
-            if (input_mode.interpolation_mode == Tegra::Shader::IpaInterpMode::Multiply) {
-                value = Operation(OperationCode::FMul, PRECISE, value, GetRegister(instr.gpr20));
+                                 : GetInputAttribute(index, attribute.element);
+
+        // Code taken from Ryujinx.
+        if (index >= Index::Attribute_0 && index <= Index::Attribute_31) {
+            const u32 location = static_cast<u32>(index) - static_cast<u32>(Index::Attribute_0);
+            if (header.ps.GetPixelImap(location) == PixelImap::Perspective) {
+                Node position_w = GetInputAttribute(Index::Position, 3);
+                value = Operation(OperationCode::FMul, move(value), move(position_w));
             }
         }
-        value = GetSaturatedFloat(value, instr.ipa.saturate);
 
-        SetRegister(bb, instr.gpr0, value);
+        if (instr.ipa.interp_mode == IpaInterpMode::Multiply) {
+            value = Operation(OperationCode::FMul, move(value), GetRegister(instr.gpr20));
+        }
+
+        value = GetSaturatedFloat(move(value), instr.ipa.saturate);
+
+        SetRegister(bb, instr.gpr0, move(value));
         break;
     }
     case OpCode::Id::OUT_R: {

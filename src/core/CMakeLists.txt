@@ -15,14 +15,14 @@ add_library(core STATIC
     constants.h
     core.cpp
     core.h
-    core_cpu.cpp
-    core_cpu.h
+    core_manager.cpp
+    core_manager.h
     core_timing.cpp
     core_timing.h
     core_timing_util.cpp
     core_timing_util.h
-    cpu_core_manager.cpp
-    cpu_core_manager.h
+    cpu_manager.cpp
+    cpu_manager.h
     crypto/aes_util.cpp
     crypto/aes_util.h
     crypto/encryption_layer.cpp
@@ -35,6 +35,8 @@ add_library(core STATIC
     crypto/ctr_encryption_layer.h
     crypto/xts_encryption_layer.cpp
     crypto/xts_encryption_layer.h
+    device_memory.cpp
+    device_memory.h
     file_sys/bis_factory.cpp
     file_sys/bis_factory.h
     file_sys/card_image.cpp
@@ -96,6 +98,8 @@ add_library(core STATIC
     file_sys/system_archive/system_archive.h
     file_sys/system_archive/system_version.cpp
     file_sys/system_archive/system_version.h
+    file_sys/system_archive/time_zone_binary.cpp
+    file_sys/system_archive/time_zone_binary.h
     file_sys/vfs.cpp
     file_sys/vfs.h
     file_sys/vfs_concat.cpp
@@ -129,8 +133,6 @@ add_library(core STATIC
     frontend/framebuffer_layout.cpp
     frontend/framebuffer_layout.h
     frontend/input.h
-    frontend/scope_acquire_window_context.cpp
-    frontend/scope_acquire_window_context.h
     gdbstub/gdbstub.cpp
     gdbstub/gdbstub.h
     hardware_interrupt_manager.cpp
@@ -152,10 +154,29 @@ add_library(core STATIC
     hle/kernel/hle_ipc.h
     hle/kernel/kernel.cpp
     hle/kernel/kernel.h
+    hle/kernel/memory/address_space_info.cpp
+    hle/kernel/memory/address_space_info.h
+    hle/kernel/memory/memory_block.h
+    hle/kernel/memory/memory_block_manager.cpp
+    hle/kernel/memory/memory_block_manager.h
+    hle/kernel/memory/memory_layout.h
+    hle/kernel/memory/memory_manager.cpp
+    hle/kernel/memory/memory_manager.h
+    hle/kernel/memory/memory_types.h
+    hle/kernel/memory/page_linked_list.h
+    hle/kernel/memory/page_heap.cpp
+    hle/kernel/memory/page_heap.h
+    hle/kernel/memory/page_table.cpp
+    hle/kernel/memory/page_table.h
+    hle/kernel/memory/slab_heap.h
+    hle/kernel/memory/system_control.cpp
+    hle/kernel/memory/system_control.h
     hle/kernel/mutex.cpp
     hle/kernel/mutex.h
     hle/kernel/object.cpp
     hle/kernel/object.h
+    hle/kernel/physical_core.cpp
+    hle/kernel/physical_core.h
     hle/kernel/process.cpp
     hle/kernel/process.h
     hle/kernel/process_capability.cpp
@@ -176,15 +197,18 @@ add_library(core STATIC
     hle/kernel/shared_memory.h
     hle/kernel/svc.cpp
     hle/kernel/svc.h
+    hle/kernel/svc_types.h
     hle/kernel/svc_wrap.h
+    hle/kernel/synchronization_object.cpp
+    hle/kernel/synchronization_object.h
+    hle/kernel/synchronization.cpp
+    hle/kernel/synchronization.h
     hle/kernel/thread.cpp
     hle/kernel/thread.h
+    hle/kernel/time_manager.cpp
+    hle/kernel/time_manager.h
     hle/kernel/transfer_memory.cpp
     hle/kernel/transfer_memory.h
-    hle/kernel/vm_manager.cpp
-    hle/kernel/vm_manager.h
-    hle/kernel/wait_object.cpp
-    hle/kernel/wait_object.h
     hle/kernel/writable_event.cpp
     hle/kernel/writable_event.h
     hle/lock.cpp
@@ -279,6 +303,18 @@ add_library(core STATIC
     hle/service/btm/btm.h
     hle/service/caps/caps.cpp
     hle/service/caps/caps.h
+    hle/service/caps/caps_a.cpp
+    hle/service/caps/caps_a.h
+    hle/service/caps/caps_c.cpp
+    hle/service/caps/caps_c.h
+    hle/service/caps/caps_u.cpp
+    hle/service/caps/caps_u.h
+    hle/service/caps/caps_sc.cpp
+    hle/service/caps/caps_sc.h
+    hle/service/caps/caps_ss.cpp
+    hle/service/caps/caps_ss.h
+    hle/service/caps/caps_su.cpp
+    hle/service/caps/caps_su.h
     hle/service/erpt/erpt.cpp
     hle/service/erpt/erpt.h
     hle/service/es/es.cpp
@@ -461,12 +497,40 @@ add_library(core STATIC
     hle/service/spl/spl.h
     hle/service/ssl/ssl.cpp
     hle/service/ssl/ssl.h
+    hle/service/time/clock_types.h
+    hle/service/time/ephemeral_network_system_clock_context_writer.h
+    hle/service/time/ephemeral_network_system_clock_core.h
+    hle/service/time/errors.h
     hle/service/time/interface.cpp
     hle/service/time/interface.h
+    hle/service/time/local_system_clock_context_writer.h
+    hle/service/time/network_system_clock_context_writer.h
+    hle/service/time/standard_local_system_clock_core.h
+    hle/service/time/standard_network_system_clock_core.h
+    hle/service/time/standard_steady_clock_core.cpp
+    hle/service/time/standard_steady_clock_core.h
+    hle/service/time/standard_user_system_clock_core.cpp
+    hle/service/time/standard_user_system_clock_core.h
+    hle/service/time/steady_clock_core.h
+    hle/service/time/system_clock_context_update_callback.cpp
+    hle/service/time/system_clock_context_update_callback.h
+    hle/service/time/system_clock_core.cpp
+    hle/service/time/system_clock_core.h
+    hle/service/time/tick_based_steady_clock_core.cpp
+    hle/service/time/tick_based_steady_clock_core.h
     hle/service/time/time.cpp
     hle/service/time/time.h
+    hle/service/time/time_manager.cpp
+    hle/service/time/time_manager.h
     hle/service/time/time_sharedmemory.cpp
     hle/service/time/time_sharedmemory.h
+    hle/service/time/time_zone_content_manager.cpp
+    hle/service/time/time_zone_content_manager.h
+    hle/service/time/time_zone_manager.cpp
+    hle/service/time/time_zone_manager.h
+    hle/service/time/time_zone_service.cpp
+    hle/service/time/time_zone_service.h
+    hle/service/time/time_zone_types.h
     hle/service/usb/usb.cpp
     hle/service/usb/usb.h
     hle/service/vi/display/vi_display.cpp
@@ -545,11 +609,8 @@ target_link_libraries(core PUBLIC common PRIVATE audio_core video_core)
 target_link_libraries(core PUBLIC Boost::boost PRIVATE fmt json-headers mbedtls opus unicorn)
 
 if (YUZU_ENABLE_BOXCAT)
-    get_directory_property(OPENSSL_LIBS
-        DIRECTORY ${PROJECT_SOURCE_DIR}/externals/libressl
-        DEFINITION OPENSSL_LIBS)
-    target_compile_definitions(core PRIVATE -DCPPHTTPLIB_OPENSSL_SUPPORT -DYUZU_ENABLE_BOXCAT)
-    target_link_libraries(core PRIVATE httplib json-headers ${OPENSSL_LIBS} zip)
+    target_compile_definitions(core PRIVATE -DYUZU_ENABLE_BOXCAT)
+    target_link_libraries(core PRIVATE httplib json-headers zip)
 endif()
 
 if (ENABLE_WEB_SERVICE)
@@ -559,8 +620,12 @@ endif()
 
 if (ARCHITECTURE_x86_64)
     target_sources(core PRIVATE
-        arm/dynarmic/arm_dynarmic.cpp
-        arm/dynarmic/arm_dynarmic.h
+        arm/dynarmic/arm_dynarmic_32.cpp
+        arm/dynarmic/arm_dynarmic_32.h
+        arm/dynarmic/arm_dynarmic_64.cpp
+        arm/dynarmic/arm_dynarmic_64.h
+        arm/dynarmic/arm_dynarmic_cp15.cpp
+        arm/dynarmic/arm_dynarmic_cp15.h
     )
     target_link_libraries(core PRIVATE dynarmic)
 endif()

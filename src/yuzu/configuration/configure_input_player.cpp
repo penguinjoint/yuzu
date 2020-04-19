@@ -236,6 +236,8 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
         widget->setVisible(false);
 
     analog_map_stick = {ui->buttonLStickAnalog, ui->buttonRStickAnalog};
+    analog_map_deadzone = {ui->sliderLStickDeadzone, ui->sliderRStickDeadzone};
+    analog_map_deadzone_label = {ui->labelLStickDeadzone, ui->labelRStickDeadzone};
 
     for (int button_id = 0; button_id < Settings::NativeButton::NumButtons; button_id++) {
         auto* const button = button_map[button_id];
@@ -325,6 +327,11 @@ ConfigureInputPlayer::ConfigureInputPlayer(QWidget* parent, std::size_t player_i
                     [=](const Common::ParamPackage& params) { analogs_param[analog_id] = params; },
                     InputCommon::Polling::DeviceType::Analog);
             }
+        });
+        connect(analog_map_deadzone[analog_id], &QSlider::valueChanged, [=] {
+            const float deadzone = analog_map_deadzone[analog_id]->value() / 100.0f;
+            analog_map_deadzone_label[analog_id]->setText(tr("Deadzone: %1").arg(deadzone));
+            analogs_param[analog_id].Set("deadzone", deadzone);
         });
     }
 
@@ -484,7 +491,7 @@ void ConfigureInputPlayer::ClearAll() {
                 continue;
             }
 
-            analogs_param[analog_id].Erase(analog_sub_buttons[sub_button_id]);
+            analogs_param[analog_id].Clear();
         }
     }
 
@@ -508,6 +515,23 @@ void ConfigureInputPlayer::UpdateButtonLabels() {
                 AnalogToText(analogs_param[analog_id], analog_sub_buttons[sub_button_id]));
         }
         analog_map_stick[analog_id]->setText(tr("Set Analog Stick"));
+
+        auto& param = analogs_param[analog_id];
+        auto* const analog_deadzone_slider = analog_map_deadzone[analog_id];
+        auto* const analog_deadzone_label = analog_map_deadzone_label[analog_id];
+
+        if (param.Has("engine") && param.Get("engine", "") == "sdl") {
+            if (!param.Has("deadzone")) {
+                param.Set("deadzone", 0.1f);
+            }
+
+            analog_deadzone_slider->setValue(static_cast<int>(param.Get("deadzone", 0.1f) * 100));
+            analog_deadzone_slider->setVisible(true);
+            analog_deadzone_label->setVisible(true);
+        } else {
+            analog_deadzone_slider->setVisible(false);
+            analog_deadzone_label->setVisible(false);
+        }
     }
 }
 
@@ -517,17 +541,18 @@ void ConfigureInputPlayer::HandleClick(
     button->setText(tr("[press key]"));
     button->setFocus();
 
-    const auto iter = std::find(button_map.begin(), button_map.end(), button);
-    ASSERT(iter != button_map.end());
-    const auto index = std::distance(button_map.begin(), iter);
-    ASSERT(index < Settings::NativeButton::NumButtons && index >= 0);
+    // Keyboard keys can only be used as button devices
+    want_keyboard_keys = type == InputCommon::Polling::DeviceType::Button;
+    if (want_keyboard_keys) {
+        const auto iter = std::find(button_map.begin(), button_map.end(), button);
+        ASSERT(iter != button_map.end());
+        const auto index = std::distance(button_map.begin(), iter);
+        ASSERT(index < Settings::NativeButton::NumButtons && index >= 0);
+    }
 
     input_setter = new_input_setter;
 
     device_pollers = InputCommon::Polling::GetPollers(type);
-
-    // Keyboard keys can only be used as button devices
-    want_keyboard_keys = type == InputCommon::Polling::DeviceType::Button;
 
     for (auto& poller : device_pollers) {
         poller->Start();

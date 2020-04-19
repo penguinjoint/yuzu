@@ -111,6 +111,8 @@ PixelFormat PixelFormatFromRenderTargetFormat(Tegra::RenderTargetFormat format) 
         return PixelFormat::RGBA16F;
     case Tegra::RenderTargetFormat::RGBA16_UNORM:
         return PixelFormat::RGBA16U;
+    case Tegra::RenderTargetFormat::RGBA16_SNORM:
+        return PixelFormat::RGBA16S;
     case Tegra::RenderTargetFormat::RGBA16_UINT:
         return PixelFormat::RGBA16UI;
     case Tegra::RenderTargetFormat::RGBA32_FLOAT:
@@ -155,6 +157,8 @@ PixelFormat PixelFormatFromRenderTargetFormat(Tegra::RenderTargetFormat format) 
         return PixelFormat::R16I;
     case Tegra::RenderTargetFormat::R32_FLOAT:
         return PixelFormat::R32F;
+    case Tegra::RenderTargetFormat::R32_SINT:
+        return PixelFormat::R32I;
     case Tegra::RenderTargetFormat::R32_UINT:
         return PixelFormat::R32UI;
     case Tegra::RenderTargetFormat::RG32_UINT:

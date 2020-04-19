@@ -65,10 +65,10 @@ public:
  */
 class GameListItemPath : public GameListItem {
 public:
-    static const int TitleRole = SortRole;
-    static const int FullPathRole = SortRole + 1;
-    static const int ProgramIdRole = SortRole + 2;
-    static const int FileTypeRole = SortRole + 3;
+    static const int TitleRole = SortRole + 1;
+    static const int FullPathRole = SortRole + 2;
+    static const int ProgramIdRole = SortRole + 3;
+    static const int FileTypeRole = SortRole + 4;
 
     GameListItemPath() = default;
     GameListItemPath(const QString& game_path, const std::vector<u8>& picture_data,
@@ -95,7 +95,7 @@ public:
     }
 
     QVariant data(int role) const override {
-        if (role == Qt::DisplayRole) {
+        if (role == Qt::DisplayRole || role == SortRole) {
             std::string filename;
             Common::SplitPath(data(FullPathRole).toString().toStdString(), nullptr, &filename,
                               nullptr);
@@ -108,17 +108,30 @@ public:
             }};
 
             const auto& row1 = row_data.at(UISettings::values.row_1_text_id);
-            const auto& row2 = row_data.at(UISettings::values.row_2_text_id);
+            const int row2_id = UISettings::values.row_2_text_id;
 
-            if (row1.isEmpty() || row1 == row2)
-                return row2;
-            if (row2.isEmpty())
+            if (role == SortRole)
+                return row1.toLower();
+
+            if (row2_id == 4) // None
+                return row1;
+
+            const auto& row2 = row_data.at(row2_id);
+
+            if (row1 == row2)
                 return row1;
 
             return QString(row1 + QStringLiteral("\n    ") + row2);
         }
 
         return GameListItem::data(role);
+    }
+
+    /**
+     * Override to prevent automatic sorting.
+     */
+    bool operator<(const QStandardItem& other) const override {
+        return false;
     }
 };
 
@@ -285,6 +298,10 @@ public:
 
     int type() const override {
         return static_cast<int>(GameListItemType::AddDir);
+    }
+
+    bool operator<(const QStandardItem& other) const override {
+        return false;
     }
 };
 

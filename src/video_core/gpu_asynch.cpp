@@ -10,13 +10,17 @@
 
 namespace VideoCommon {
 
-GPUAsynch::GPUAsynch(Core::System& system, VideoCore::RendererBase& renderer)
-    : GPU(system, renderer, true), gpu_thread{system} {}
+GPUAsynch::GPUAsynch(Core::System& system, std::unique_ptr<VideoCore::RendererBase>&& renderer_,
+                     std::unique_ptr<Core::Frontend::GraphicsContext>&& context)
+    : GPU(system, std::move(renderer_), true), gpu_thread{system},
+      cpu_context(renderer->GetRenderWindow().CreateSharedContext()),
+      gpu_context(std::move(context)) {}
 
 GPUAsynch::~GPUAsynch() = default;
 
 void GPUAsynch::Start() {
-    gpu_thread.StartThread(renderer, *dma_pusher);
+    cpu_context->MakeCurrent();
+    gpu_thread.StartThread(*renderer, *gpu_context, *dma_pusher);
 }
 
 void GPUAsynch::PushGPUEntries(Tegra::CommandList&& entries) {
@@ -27,15 +31,15 @@ void GPUAsynch::SwapBuffers(const Tegra::FramebufferConfig* framebuffer) {
     gpu_thread.SwapBuffers(framebuffer);
 }
 
-void GPUAsynch::FlushRegion(CacheAddr addr, u64 size) {
+void GPUAsynch::FlushRegion(VAddr addr, u64 size) {
     gpu_thread.FlushRegion(addr, size);
 }
 
-void GPUAsynch::InvalidateRegion(CacheAddr addr, u64 size) {
+void GPUAsynch::InvalidateRegion(VAddr addr, u64 size) {
     gpu_thread.InvalidateRegion(addr, size);
 }
 
-void GPUAsynch::FlushAndInvalidateRegion(CacheAddr addr, u64 size) {
+void GPUAsynch::FlushAndInvalidateRegion(VAddr addr, u64 size) {
     gpu_thread.FlushAndInvalidateRegion(addr, size);
 }
 

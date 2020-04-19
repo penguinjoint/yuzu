@@ -86,6 +86,7 @@ void LogSettings() {
     LogSetting("System_RngSeed", Settings::values.rng_seed.value_or(0));
     LogSetting("System_CurrentUser", Settings::values.current_user);
     LogSetting("System_LanguageIndex", Settings::values.language_index);
+    LogSetting("System_RegionIndex", Settings::values.region_index);
     LogSetting("Core_UseMultiCore", Settings::values.use_multi_core);
     LogSetting("Renderer_UseResolutionFactor", Settings::values.resolution_factor);
     LogSetting("Renderer_UseFrameLimit", Settings::values.use_frame_limit);
@@ -94,6 +95,7 @@ void LogSettings() {
     LogSetting("Renderer_UseAccurateGpuEmulation", Settings::values.use_accurate_gpu_emulation);
     LogSetting("Renderer_UseAsynchronousGpuEmulation",
                Settings::values.use_asynchronous_gpu_emulation);
+    LogSetting("Renderer_UseVsync", Settings::values.use_vsync);
     LogSetting("Audio_OutputEngine", Settings::values.sink_id);
     LogSetting("Audio_EnableAudioStretching", Settings::values.enable_audio_stretching);
     LogSetting("Audio_OutputDevice", Settings::values.audio_device_id);

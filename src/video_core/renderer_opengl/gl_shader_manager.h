@@ -9,7 +9,6 @@
 #include <glad/glad.h>
 
 #include "video_core/renderer_opengl/gl_resource_manager.h"
-#include "video_core/renderer_opengl/gl_state.h"
 #include "video_core/renderer_opengl/maxwell_to_gl.h"
 
 namespace OpenGL::GLShader {
@@ -32,49 +31,47 @@ public:
     explicit ProgramManager();
     ~ProgramManager();
 
-    void ApplyTo(OpenGLState& state);
+    void Create();
 
-    void UseProgrammableVertexShader(GLuint program) {
+    /// Updates the graphics pipeline and binds it.
+    void BindGraphicsPipeline();
+
+    /// Binds a compute shader.
+    void BindComputeShader(GLuint program);
+
+    void UseVertexShader(GLuint program) {
         current_state.vertex_shader = program;
     }
 
-    void UseProgrammableGeometryShader(GLuint program) {
+    void UseGeometryShader(GLuint program) {
         current_state.geometry_shader = program;
     }
 
-    void UseProgrammableFragmentShader(GLuint program) {
+    void UseFragmentShader(GLuint program) {
         current_state.fragment_shader = program;
-    }
-
-    void UseTrivialGeometryShader() {
-        current_state.geometry_shader = 0;
-    }
-
-    void UseTrivialFragmentShader() {
-        current_state.fragment_shader = 0;
     }
 
 private:
     struct PipelineState {
-        bool operator==(const PipelineState& rhs) const {
+        bool operator==(const PipelineState& rhs) const noexcept {
             return vertex_shader == rhs.vertex_shader && fragment_shader == rhs.fragment_shader &&
                    geometry_shader == rhs.geometry_shader;
         }
 
-        bool operator!=(const PipelineState& rhs) const {
+        bool operator!=(const PipelineState& rhs) const noexcept {
             return !operator==(rhs);
         }
 
-        GLuint vertex_shader{};
-        GLuint fragment_shader{};
-        GLuint geometry_shader{};
+        GLuint vertex_shader = 0;
+        GLuint fragment_shader = 0;
+        GLuint geometry_shader = 0;
     };
 
-    void UpdatePipeline();
-
-    OGLPipeline pipeline;
+    OGLPipeline graphics_pipeline;
+    OGLPipeline compute_pipeline;
     PipelineState current_state;
     PipelineState old_state;
+    bool is_graphics_bound = true;
 };
 
 } // namespace OpenGL::GLShader

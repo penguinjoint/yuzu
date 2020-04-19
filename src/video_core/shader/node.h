@@ -162,6 +162,36 @@ enum class OperationCode {
     AtomicImageXor,      /// (MetaImage, int[N] coords) -> void
     AtomicImageExchange, /// (MetaImage, int[N] coords) -> void
 
+    AtomicUExchange, /// (memory, uint) -> uint
+    AtomicUAdd,      /// (memory, uint) -> uint
+    AtomicUMin,      /// (memory, uint) -> uint
+    AtomicUMax,      /// (memory, uint) -> uint
+    AtomicUAnd,      /// (memory, uint) -> uint
+    AtomicUOr,       /// (memory, uint) -> uint
+    AtomicUXor,      /// (memory, uint) -> uint
+
+    AtomicIExchange, /// (memory, int) -> int
+    AtomicIAdd,      /// (memory, int) -> int
+    AtomicIMin,      /// (memory, int) -> int
+    AtomicIMax,      /// (memory, int) -> int
+    AtomicIAnd,      /// (memory, int) -> int
+    AtomicIOr,       /// (memory, int) -> int
+    AtomicIXor,      /// (memory, int) -> int
+
+    ReduceUAdd, /// (memory, uint) -> void
+    ReduceUMin, /// (memory, uint) -> void
+    ReduceUMax, /// (memory, uint) -> void
+    ReduceUAnd, /// (memory, uint) -> void
+    ReduceUOr,  /// (memory, uint) -> void
+    ReduceUXor, /// (memory, uint) -> void
+
+    ReduceIAdd, /// (memory, int) -> void
+    ReduceIMin, /// (memory, int) -> void
+    ReduceIMax, /// (memory, int) -> void
+    ReduceIAnd, /// (memory, int) -> void
+    ReduceIOr,  /// (memory, int) -> void
+    ReduceIXor, /// (memory, int) -> void
+
     Branch,         /// (uint branch_target) -> void
     BranchIndirect, /// (uint branch_target) -> void
     PushFlowStack,  /// (uint branch_target) -> void
@@ -210,6 +240,7 @@ enum class MetaStackClass {
 class OperationNode;
 class ConditionalNode;
 class GprNode;
+class CustomVarNode;
 class ImmediateNode;
 class InternalFlagNode;
 class PredicateNode;
@@ -221,26 +252,32 @@ class SmemNode;
 class GmemNode;
 class CommentNode;
 
-using NodeData = std::variant<OperationNode, ConditionalNode, GprNode, ImmediateNode,
+using NodeData = std::variant<OperationNode, ConditionalNode, GprNode, CustomVarNode, ImmediateNode,
                               InternalFlagNode, PredicateNode, AbufNode, PatchNode, CbufNode,
                               LmemNode, SmemNode, GmemNode, CommentNode>;
 using Node = std::shared_ptr<NodeData>;
 using Node4 = std::array<Node, 4>;
 using NodeBlock = std::vector<Node>;
 
+class BindlessSamplerNode;
+class ArraySamplerNode;
+
+using TrackSamplerData = std::variant<BindlessSamplerNode, ArraySamplerNode>;
+using TrackSampler = std::shared_ptr<TrackSamplerData>;
+
 class Sampler {
 public:
     /// This constructor is for bound samplers
     constexpr explicit Sampler(u32 index, u32 offset, Tegra::Shader::TextureType type,
-                               bool is_array, bool is_shadow, bool is_buffer)
+                               bool is_array, bool is_shadow, bool is_buffer, bool is_indexed)
         : index{index}, offset{offset}, type{type}, is_array{is_array}, is_shadow{is_shadow},
-          is_buffer{is_buffer} {}
+          is_buffer{is_buffer}, is_indexed{is_indexed} {}
 
     /// This constructor is for bindless samplers
     constexpr explicit Sampler(u32 index, u32 offset, u32 buffer, Tegra::Shader::TextureType type,
-                               bool is_array, bool is_shadow, bool is_buffer)
+                               bool is_array, bool is_shadow, bool is_buffer, bool is_indexed)
         : index{index}, offset{offset}, buffer{buffer}, type{type}, is_array{is_array},
-          is_shadow{is_shadow}, is_buffer{is_buffer}, is_bindless{true} {}
+          is_shadow{is_shadow}, is_buffer{is_buffer}, is_bindless{true}, is_indexed{is_indexed} {}
 
     constexpr u32 GetIndex() const {
         return index;
@@ -274,16 +311,72 @@ public:
         return is_bindless;
     }
 
+    constexpr bool IsIndexed() const {
+        return is_indexed;
+    }
+
+    constexpr u32 Size() const {
+        return size;
+    }
+
+    constexpr void SetSize(u32 new_size) {
+        size = new_size;
+    }
+
 private:
     u32 index{};  ///< Emulated index given for the this sampler.
     u32 offset{}; ///< Offset in the const buffer from where the sampler is being read.
     u32 buffer{}; ///< Buffer where the bindless sampler is being read (unused on bound samplers).
+    u32 size{1};  ///< Size of the sampler.
 
     Tegra::Shader::TextureType type{}; ///< The type used to sample this texture (Texture2D, etc)
     bool is_array{};    ///< Whether the texture is being sampled as an array texture or not.
     bool is_shadow{};   ///< Whether the texture is being sampled as a depth texture or not.
     bool is_buffer{};   ///< Whether the texture is a texture buffer without sampler.
     bool is_bindless{}; ///< Whether this sampler belongs to a bindless texture or not.
+    bool is_indexed{};  ///< Whether this sampler is an indexed array of textures.
+};
+
+/// Represents a tracked bindless sampler into a direct const buffer
+class ArraySamplerNode final {
+public:
+    explicit ArraySamplerNode(u32 index, u32 base_offset, u32 bindless_var)
+        : index{index}, base_offset{base_offset}, bindless_var{bindless_var} {}
+
+    constexpr u32 GetIndex() const {
+        return index;
+    }
+
+    constexpr u32 GetBaseOffset() const {
+        return base_offset;
+    }
+
+    constexpr u32 GetIndexVar() const {
+        return bindless_var;
+    }
+
+private:
+    u32 index;
+    u32 base_offset;
+    u32 bindless_var;
+};
+
+/// Represents a tracked bindless sampler into a direct const buffer
+class BindlessSamplerNode final {
+public:
+    explicit BindlessSamplerNode(u32 index, u32 offset) : index{index}, offset{offset} {}
+
+    constexpr u32 GetIndex() const {
+        return index;
+    }
+
+    constexpr u32 GetOffset() const {
+        return offset;
+    }
+
+private:
+    u32 index;
+    u32 offset;
 };
 
 class Image final {
@@ -378,8 +471,9 @@ struct MetaTexture {
     std::vector<Node> derivates;
     Node bias;
     Node lod;
-    Node component{};
+    Node component;
     u32 element{};
+    Node index;
 };
 
 struct MetaImage {
@@ -392,8 +486,30 @@ struct MetaImage {
 using Meta =
     std::variant<MetaArithmetic, MetaTexture, MetaImage, MetaStackClass, Tegra::Shader::HalfType>;
 
+class AmendNode {
+public:
+    std::optional<std::size_t> GetAmendIndex() const {
+        if (amend_index == amend_null_index) {
+            return std::nullopt;
+        }
+        return {amend_index};
+    }
+
+    void SetAmendIndex(std::size_t index) {
+        amend_index = index;
+    }
+
+    void ClearAmend() {
+        amend_index = amend_null_index;
+    }
+
+private:
+    static constexpr std::size_t amend_null_index = 0xFFFFFFFFFFFFFFFFULL;
+    std::size_t amend_index{amend_null_index};
+};
+
 /// Holds any kind of operation that can be done in the IR
-class OperationNode final {
+class OperationNode final : public AmendNode {
 public:
     explicit OperationNode(OperationCode code) : OperationNode(code, Meta{}) {}
 
@@ -433,7 +549,7 @@ private:
 };
 
 /// Encloses inside any kind of node that returns a boolean conditionally-executed code
-class ConditionalNode final {
+class ConditionalNode final : public AmendNode {
 public:
     explicit ConditionalNode(Node condition, std::vector<Node>&& code)
         : condition{std::move(condition)}, code{std::move(code)} {}
@@ -462,6 +578,19 @@ public:
 
 private:
     Tegra::Shader::Register index{};
+};
+
+/// A custom variable
+class CustomVarNode final {
+public:
+    explicit constexpr CustomVarNode(u32 index) : index{index} {}
+
+    constexpr u32 GetIndex() const {
+        return index;
+    }
+
+private:
+    u32 index{};
 };
 
 /// A 32-bits value that represents an immediate value

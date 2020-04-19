@@ -3,9 +3,12 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <utility>
 #include <vector>
+
 #include <fmt/format.h>
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "common/logging/log.h"
@@ -15,42 +18,94 @@
 
 namespace VideoCommon::Shader {
 
+using std::move;
+using Tegra::Shader::AtomicOp;
+using Tegra::Shader::AtomicType;
 using Tegra::Shader::Attribute;
+using Tegra::Shader::GlobalAtomicType;
 using Tegra::Shader::Instruction;
 using Tegra::Shader::OpCode;
 using Tegra::Shader::Register;
+using Tegra::Shader::StoreType;
 
 namespace {
 
-u32 GetLdgMemorySize(Tegra::Shader::UniformType uniform_type) {
-    switch (uniform_type) {
-    case Tegra::Shader::UniformType::UnsignedByte:
-    case Tegra::Shader::UniformType::Single:
-        return 1;
-    case Tegra::Shader::UniformType::Double:
-        return 2;
-    case Tegra::Shader::UniformType::Quad:
-    case Tegra::Shader::UniformType::UnsignedQuad:
-        return 4;
+OperationCode GetAtomOperation(AtomicOp op) {
+    switch (op) {
+    case AtomicOp::Add:
+        return OperationCode::AtomicIAdd;
+    case AtomicOp::Min:
+        return OperationCode::AtomicIMin;
+    case AtomicOp::Max:
+        return OperationCode::AtomicIMax;
+    case AtomicOp::And:
+        return OperationCode::AtomicIAnd;
+    case AtomicOp::Or:
+        return OperationCode::AtomicIOr;
+    case AtomicOp::Xor:
+        return OperationCode::AtomicIXor;
+    case AtomicOp::Exch:
+        return OperationCode::AtomicIExchange;
     default:
-        UNIMPLEMENTED_MSG("Unimplemented size={}!", static_cast<u32>(uniform_type));
-        return 1;
+        UNIMPLEMENTED_MSG("op={}", static_cast<int>(op));
+        return OperationCode::AtomicIAdd;
     }
 }
 
-u32 GetStgMemorySize(Tegra::Shader::UniformType uniform_type) {
+bool IsUnaligned(Tegra::Shader::UniformType uniform_type) {
+    return uniform_type == Tegra::Shader::UniformType::UnsignedByte ||
+           uniform_type == Tegra::Shader::UniformType::UnsignedShort;
+}
+
+u32 GetUnalignedMask(Tegra::Shader::UniformType uniform_type) {
     switch (uniform_type) {
+    case Tegra::Shader::UniformType::UnsignedByte:
+        return 0b11;
+    case Tegra::Shader::UniformType::UnsignedShort:
+        return 0b10;
+    default:
+        UNREACHABLE();
+        return 0;
+    }
+}
+
+u32 GetMemorySize(Tegra::Shader::UniformType uniform_type) {
+    switch (uniform_type) {
+    case Tegra::Shader::UniformType::UnsignedByte:
+        return 8;
+    case Tegra::Shader::UniformType::UnsignedShort:
+        return 16;
     case Tegra::Shader::UniformType::Single:
-        return 1;
+        return 32;
     case Tegra::Shader::UniformType::Double:
-        return 2;
+        return 64;
     case Tegra::Shader::UniformType::Quad:
     case Tegra::Shader::UniformType::UnsignedQuad:
-        return 4;
+        return 128;
     default:
         UNIMPLEMENTED_MSG("Unimplemented size={}!", static_cast<u32>(uniform_type));
-        return 1;
+        return 32;
     }
+}
+
+Node ExtractUnaligned(Node value, Node address, u32 mask, u32 size) {
+    Node offset = Operation(OperationCode::UBitwiseAnd, address, Immediate(mask));
+    offset = Operation(OperationCode::ULogicalShiftLeft, move(offset), Immediate(3));
+    return Operation(OperationCode::UBitfieldExtract, move(value), move(offset), Immediate(size));
+}
+
+Node InsertUnaligned(Node dest, Node value, Node address, u32 mask, u32 size) {
+    Node offset = Operation(OperationCode::UBitwiseAnd, move(address), Immediate(mask));
+    offset = Operation(OperationCode::ULogicalShiftLeft, move(offset), Immediate(3));
+    return Operation(OperationCode::UBitfieldInsert, move(dest), move(value), move(offset),
+                     Immediate(size));
+}
+
+Node Sign16Extend(Node value) {
+    Node sign = Operation(OperationCode::UBitwiseAnd, value, Immediate(1U << 15));
+    Node is_sign = Operation(OperationCode::LogicalUEqual, move(sign), Immediate(1U << 15));
+    Node extend = Operation(OperationCode::Select, is_sign, Immediate(0xFFFF0000), Immediate(0));
+    return Operation(OperationCode::UBitwiseOr, move(value), move(extend));
 }
 
 } // Anonymous namespace
@@ -128,26 +183,31 @@ u32 ShaderIR::DecodeMemory(NodeBlock& bb, u32 pc) {
         LOG_DEBUG(HW_GPU, "LD_L cache management mode: {}", static_cast<u64>(instr.ld_l.unknown));
         [[fallthrough]];
     case OpCode::Id::LD_S: {
-        const auto GetMemory = [&](s32 offset) {
+        const auto GetAddress = [&](s32 offset) {
             ASSERT(offset % 4 == 0);
             const Node immediate_offset = Immediate(static_cast<s32>(instr.smem_imm) + offset);
-            const Node address = Operation(OperationCode::IAdd, NO_PRECISE, GetRegister(instr.gpr8),
-                                           immediate_offset);
-            return opcode->get().GetId() == OpCode::Id::LD_S ? GetSharedMemory(address)
-                                                             : GetLocalMemory(address);
+            return Operation(OperationCode::IAdd, GetRegister(instr.gpr8), immediate_offset);
+        };
+        const auto GetMemory = [&](s32 offset) {
+            return opcode->get().GetId() == OpCode::Id::LD_S ? GetSharedMemory(GetAddress(offset))
+                                                             : GetLocalMemory(GetAddress(offset));
         };
 
         switch (instr.ldst_sl.type.Value()) {
-        case Tegra::Shader::StoreType::Bits32:
-        case Tegra::Shader::StoreType::Bits64:
-        case Tegra::Shader::StoreType::Bits128: {
-            const u32 count = [&]() {
+        case StoreType::Signed16:
+            SetRegister(bb, instr.gpr0,
+                        Sign16Extend(ExtractUnaligned(GetMemory(0), GetAddress(0), 0b10, 16)));
+            break;
+        case StoreType::Bits32:
+        case StoreType::Bits64:
+        case StoreType::Bits128: {
+            const u32 count = [&] {
                 switch (instr.ldst_sl.type.Value()) {
-                case Tegra::Shader::StoreType::Bits32:
+                case StoreType::Bits32:
                     return 1;
-                case Tegra::Shader::StoreType::Bits64:
+                case StoreType::Bits64:
                     return 2;
-                case Tegra::Shader::StoreType::Bits128:
+                case StoreType::Bits128:
                     return 4;
                 default:
                     UNREACHABLE();
@@ -184,9 +244,10 @@ u32 ShaderIR::DecodeMemory(NodeBlock& bb, u32 pc) {
         }();
 
         const auto [real_address_base, base_address, descriptor] =
-            TrackGlobalMemory(bb, instr, false);
+            TrackGlobalMemory(bb, instr, true, false);
 
-        const u32 count = GetLdgMemorySize(type);
+        const u32 size = GetMemorySize(type);
+        const u32 count = Common::AlignUp(size, 32) / 32;
         if (!real_address_base || !base_address) {
             // Tracking failed, load zeroes.
             for (u32 i = 0; i < count; ++i) {
@@ -200,14 +261,10 @@ u32 ShaderIR::DecodeMemory(NodeBlock& bb, u32 pc) {
             const Node real_address = Operation(OperationCode::UAdd, real_address_base, it_offset);
             Node gmem = MakeNode<GmemNode>(real_address, base_address, descriptor);
 
-            if (type == Tegra::Shader::UniformType::UnsignedByte) {
-                // To handle unaligned loads get the byte used to dereferenced global memory
-                // and extract that byte from the loaded uint32.
-                Node byte = Operation(OperationCode::UBitwiseAnd, real_address, Immediate(3));
-                byte = Operation(OperationCode::ULogicalShiftLeft, std::move(byte), Immediate(3));
-
-                gmem = Operation(OperationCode::UBitfieldExtract, std::move(gmem), std::move(byte),
-                                 Immediate(8));
+            // To handle unaligned loads get the bytes used to dereference global memory and extract
+            // those bytes from the loaded u32.
+            if (IsUnaligned(type)) {
+                gmem = ExtractUnaligned(gmem, real_address, GetUnalignedMask(type), size);
             }
 
             SetTemporary(bb, i, gmem);
@@ -259,21 +316,28 @@ u32 ShaderIR::DecodeMemory(NodeBlock& bb, u32 pc) {
             return Operation(OperationCode::IAdd, NO_PRECISE, GetRegister(instr.gpr8), immediate);
         };
 
-        const auto set_memory = opcode->get().GetId() == OpCode::Id::ST_L
-                                    ? &ShaderIR::SetLocalMemory
-                                    : &ShaderIR::SetSharedMemory;
+        const bool is_local = opcode->get().GetId() == OpCode::Id::ST_L;
+        const auto set_memory = is_local ? &ShaderIR::SetLocalMemory : &ShaderIR::SetSharedMemory;
+        const auto get_memory = is_local ? &ShaderIR::GetLocalMemory : &ShaderIR::GetSharedMemory;
 
         switch (instr.ldst_sl.type.Value()) {
-        case Tegra::Shader::StoreType::Bits128:
+        case StoreType::Bits128:
             (this->*set_memory)(bb, GetAddress(12), GetRegister(instr.gpr0.Value() + 3));
             (this->*set_memory)(bb, GetAddress(8), GetRegister(instr.gpr0.Value() + 2));
             [[fallthrough]];
-        case Tegra::Shader::StoreType::Bits64:
+        case StoreType::Bits64:
             (this->*set_memory)(bb, GetAddress(4), GetRegister(instr.gpr0.Value() + 1));
             [[fallthrough]];
-        case Tegra::Shader::StoreType::Bits32:
+        case StoreType::Bits32:
             (this->*set_memory)(bb, GetAddress(0), GetRegister(instr.gpr0));
             break;
+        case StoreType::Signed16: {
+            Node address = GetAddress(0);
+            Node memory = (this->*get_memory)(address);
+            (this->*set_memory)(
+                bb, address, InsertUnaligned(memory, GetRegister(instr.gpr0), address, 0b10, 16));
+            break;
+        }
         default:
             UNIMPLEMENTED_MSG("{} unhandled type: {}", opcode->get().GetName(),
                               static_cast<u32>(instr.ldst_sl.type.Value()));
@@ -295,21 +359,87 @@ u32 ShaderIR::DecodeMemory(NodeBlock& bb, u32 pc) {
             }
         }();
 
+        // For unaligned reads we have to read memory too.
+        const bool is_read = IsUnaligned(type);
         const auto [real_address_base, base_address, descriptor] =
-            TrackGlobalMemory(bb, instr, true);
+            TrackGlobalMemory(bb, instr, is_read, true);
         if (!real_address_base || !base_address) {
             // Tracking failed, skip the store.
             break;
         }
 
-        const u32 count = GetStgMemorySize(type);
+        const u32 size = GetMemorySize(type);
+        const u32 count = Common::AlignUp(size, 32) / 32;
         for (u32 i = 0; i < count; ++i) {
             const Node it_offset = Immediate(i * 4);
             const Node real_address = Operation(OperationCode::UAdd, real_address_base, it_offset);
             const Node gmem = MakeNode<GmemNode>(real_address, base_address, descriptor);
-            const Node value = GetRegister(instr.gpr0.Value() + i);
+            Node value = GetRegister(instr.gpr0.Value() + i);
+
+            if (IsUnaligned(type)) {
+                const u32 mask = GetUnalignedMask(type);
+                value = InsertUnaligned(gmem, move(value), real_address, mask, size);
+            }
+
             bb.push_back(Operation(OperationCode::Assign, gmem, value));
         }
+        break;
+    }
+    case OpCode::Id::RED: {
+        UNIMPLEMENTED_IF_MSG(instr.red.type != GlobalAtomicType::U32);
+        UNIMPLEMENTED_IF_MSG(instr.red.operation != AtomicOp::Add);
+        const auto [real_address, base_address, descriptor] =
+            TrackGlobalMemory(bb, instr, true, true);
+        if (!real_address || !base_address) {
+            // Tracking failed, skip atomic.
+            break;
+        }
+        Node gmem = MakeNode<GmemNode>(real_address, base_address, descriptor);
+        Node value = GetRegister(instr.gpr0);
+        bb.push_back(Operation(OperationCode::ReduceIAdd, move(gmem), move(value)));
+        break;
+    }
+    case OpCode::Id::ATOM: {
+        UNIMPLEMENTED_IF_MSG(instr.atom.operation == AtomicOp::Inc ||
+                                 instr.atom.operation == AtomicOp::Dec ||
+                                 instr.atom.operation == AtomicOp::SafeAdd,
+                             "operation={}", static_cast<int>(instr.atom.operation.Value()));
+        UNIMPLEMENTED_IF_MSG(instr.atom.type == GlobalAtomicType::S64 ||
+                                 instr.atom.type == GlobalAtomicType::U64 ||
+                                 instr.atom.type == GlobalAtomicType::F16x2_FTZ_RN ||
+                                 instr.atom.type == GlobalAtomicType::F32_FTZ_RN,
+                             "type={}", static_cast<int>(instr.atom.type.Value()));
+
+        const auto [real_address, base_address, descriptor] =
+            TrackGlobalMemory(bb, instr, true, true);
+        if (!real_address || !base_address) {
+            // Tracking failed, skip atomic.
+            break;
+        }
+
+        const bool is_signed =
+            instr.atom.type == GlobalAtomicType::S32 || instr.atom.type == GlobalAtomicType::S64;
+        Node gmem = MakeNode<GmemNode>(real_address, base_address, descriptor);
+        SetRegister(bb, instr.gpr0,
+                    SignedOperation(GetAtomOperation(instr.atom.operation), is_signed, gmem,
+                                    GetRegister(instr.gpr20)));
+        break;
+    }
+    case OpCode::Id::ATOMS: {
+        UNIMPLEMENTED_IF_MSG(instr.atoms.operation == AtomicOp::Inc ||
+                                 instr.atoms.operation == AtomicOp::Dec,
+                             "operation={}", static_cast<int>(instr.atoms.operation.Value()));
+        UNIMPLEMENTED_IF_MSG(instr.atoms.type == AtomicType::S64 ||
+                                 instr.atoms.type == AtomicType::U64,
+                             "type={}", static_cast<int>(instr.atoms.type.Value()));
+        const bool is_signed =
+            instr.atoms.type == AtomicType::S32 || instr.atoms.type == AtomicType::S64;
+        const s32 offset = instr.atoms.GetImmediateOffset();
+        Node address = GetRegister(instr.gpr8);
+        address = Operation(OperationCode::IAdd, move(address), Immediate(offset));
+        SetRegister(bb, instr.gpr0,
+                    SignedOperation(GetAtomOperation(instr.atoms.operation), is_signed,
+                                    GetSharedMemory(move(address)), GetRegister(instr.gpr20)));
         break;
     }
     case OpCode::Id::AL2P: {
@@ -336,7 +466,7 @@ u32 ShaderIR::DecodeMemory(NodeBlock& bb, u32 pc) {
 
 std::tuple<Node, Node, GlobalMemoryBase> ShaderIR::TrackGlobalMemory(NodeBlock& bb,
                                                                      Instruction instr,
-                                                                     bool is_write) {
+                                                                     bool is_read, bool is_write) {
     const auto addr_register{GetRegister(instr.gmem.gpr)};
     const auto immediate_offset{static_cast<u32>(instr.gmem.offset)};
 
@@ -351,11 +481,8 @@ std::tuple<Node, Node, GlobalMemoryBase> ShaderIR::TrackGlobalMemory(NodeBlock& 
     const GlobalMemoryBase descriptor{index, offset};
     const auto& [entry, is_new] = used_global_memory.try_emplace(descriptor);
     auto& usage = entry->second;
-    if (is_write) {
-        usage.is_written = true;
-    } else {
-        usage.is_read = true;
-    }
+    usage.is_written |= is_write;
+    usage.is_read |= is_read;
 
     const auto real_address =
         Operation(OperationCode::UAdd, NO_PRECISE, Immediate(immediate_offset), addr_register);

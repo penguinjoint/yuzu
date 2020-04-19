@@ -8,20 +8,28 @@
 
 namespace Layout {
 
-enum ScreenUndocked : u32 {
-    Width = 1280,
-    Height = 720,
-};
+namespace ScreenUndocked {
+constexpr u32 Width = 1280;
+constexpr u32 Height = 720;
+} // namespace ScreenUndocked
 
-enum ScreenDocked : u32 {
-    WidthDocked = 1920,
-    HeightDocked = 1080,
+namespace ScreenDocked {
+constexpr u32 Width = 1920;
+constexpr u32 Height = 1080;
+} // namespace ScreenDocked
+
+enum class AspectRatio {
+    Default,
+    R4_3,
+    R21_9,
+    StretchToWindow,
 };
 
 /// Describes the layout of the window framebuffer
 struct FramebufferLayout {
     u32 width{ScreenUndocked::Width};
     u32 height{ScreenUndocked::Height};
+    bool is_srgb{};
 
     Common::Rectangle<u32> screen;
 
@@ -47,5 +55,13 @@ FramebufferLayout DefaultFrameLayout(u32 width, u32 height);
  * @param res_scale resolution scale factor
  */
 FramebufferLayout FrameLayoutFromResolutionScale(u32 res_scale);
+
+/**
+ * Convenience method to determine emulation aspect ratio
+ * @param aspect Represents the index of aspect ratio stored in Settings::values.aspect_ratio
+ * @param window_aspect_ratio Current window aspect ratio
+ * @return Emulation render window aspect ratio
+ */
+float EmulationAspectRatio(AspectRatio aspect, float window_aspect_ratio);
 
 } // namespace Layout

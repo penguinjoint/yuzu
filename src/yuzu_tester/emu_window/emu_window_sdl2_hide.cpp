@@ -5,10 +5,15 @@
 #include <algorithm>
 #include <cstdlib>
 #include <string>
+
+#include <fmt/format.h>
+
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
-#include <fmt/format.h>
+
 #include <glad/glad.h>
+
+#include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/scm_rev.h"
 #include "core/settings.h"
@@ -97,8 +102,6 @@ EmuWindow_SDL2_Hide::EmuWindow_SDL2_Hide() {
     LOG_INFO(Frontend, "yuzu-tester Version: {} | {}-{}", Common::g_build_fullname,
              Common::g_scm_branch, Common::g_scm_desc);
     Settings::LogSettings();
-
-    DoneCurrent();
 }
 
 EmuWindow_SDL2_Hide::~EmuWindow_SDL2_Hide() {
@@ -107,16 +110,40 @@ EmuWindow_SDL2_Hide::~EmuWindow_SDL2_Hide() {
     SDL_Quit();
 }
 
-void EmuWindow_SDL2_Hide::SwapBuffers() {
-    SDL_GL_SwapWindow(render_window);
-}
-
 void EmuWindow_SDL2_Hide::PollEvents() {}
 
-void EmuWindow_SDL2_Hide::MakeCurrent() {
-    SDL_GL_MakeCurrent(render_window, gl_context);
+bool EmuWindow_SDL2_Hide::IsShown() const {
+    return false;
 }
 
-void EmuWindow_SDL2_Hide::DoneCurrent() {
-    SDL_GL_MakeCurrent(render_window, nullptr);
+class SDLGLContext : public Core::Frontend::GraphicsContext {
+public:
+    explicit SDLGLContext() {
+        // create a hidden window to make the shared context against
+        window = SDL_CreateWindow(NULL, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 0, 0,
+                                  SDL_WINDOW_HIDDEN | SDL_WINDOW_OPENGL);
+        context = SDL_GL_CreateContext(window);
+    }
+
+    ~SDLGLContext() {
+        DoneCurrent();
+        SDL_GL_DeleteContext(context);
+        SDL_DestroyWindow(window);
+    }
+
+    void MakeCurrent() override {
+        SDL_GL_MakeCurrent(window, context);
+    }
+
+    void DoneCurrent() override {
+        SDL_GL_MakeCurrent(window, nullptr);
+    }
+
+private:
+    SDL_Window* window;
+    SDL_GLContext context;
+};
+
+std::unique_ptr<Core::Frontend::GraphicsContext> EmuWindow_SDL2_Hide::CreateSharedContext() const {
+    return std::make_unique<SDLGLContext>();
 }

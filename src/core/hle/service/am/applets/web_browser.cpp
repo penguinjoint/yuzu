@@ -254,6 +254,12 @@ void WebBrowser::Execute() {
 
     if (status != RESULT_SUCCESS) {
         complete = true;
+
+        // This is a workaround in order not to softlock yuzu when an error happens during the
+        // webapplet init. In order to avoid an svcBreak, the status is set to RESULT_SUCCESS
+        Finalize();
+        status = RESULT_SUCCESS;
+
         return;
     }
 
@@ -284,7 +290,7 @@ void WebBrowser::Finalize() {
     std::vector<u8> data(sizeof(WebCommonReturnValue));
     std::memcpy(data.data(), &out, sizeof(WebCommonReturnValue));
 
-    broker.PushNormalDataFromApplet(IStorage{data});
+    broker.PushNormalDataFromApplet(std::make_shared<IStorage>(std::move(data)));
     broker.SignalStateChanged();
 
     if (!temporary_dir.empty() && FileUtil::IsDirectory(temporary_dir)) {

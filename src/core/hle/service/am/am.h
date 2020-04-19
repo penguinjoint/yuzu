@@ -12,7 +12,8 @@
 
 namespace Kernel {
 class KernelCore;
-}
+class TransferMemory;
+} // namespace Kernel
 
 namespace Service::NVFlinger {
 class NVFlinger;
@@ -181,6 +182,10 @@ private:
     void GetOperationMode(Kernel::HLERequestContext& ctx);
     void GetPerformanceMode(Kernel::HLERequestContext& ctx);
     void GetBootMode(Kernel::HLERequestContext& ctx);
+    void IsVrModeEnabled(Kernel::HLERequestContext& ctx);
+    void SetVrModeEnabled(Kernel::HLERequestContext& ctx);
+    void SetLcdBacklighOffEnabled(Kernel::HLERequestContext& ctx);
+    void EndVrModeEx(Kernel::HLERequestContext& ctx);
     void GetDefaultDisplayResolution(Kernel::HLERequestContext& ctx);
     void SetCpuBoostMode(Kernel::HLERequestContext& ctx);
 
@@ -188,19 +193,36 @@ private:
     std::shared_ptr<AppletMessageQueue> msg_queue;
 };
 
+class IStorageImpl {
+public:
+    virtual ~IStorageImpl();
+    virtual std::vector<u8>& GetData() = 0;
+    virtual const std::vector<u8>& GetData() const = 0;
+    virtual std::size_t GetSize() const = 0;
+};
+
 class IStorage final : public ServiceFramework<IStorage> {
 public:
-    explicit IStorage(std::vector<u8> buffer);
+    explicit IStorage(std::vector<u8>&& buffer);
     ~IStorage() override;
 
-    const std::vector<u8>& GetData() const;
+    std::vector<u8>& GetData() {
+        return impl->GetData();
+    }
+
+    const std::vector<u8>& GetData() const {
+        return impl->GetData();
+    }
+
+    std::size_t GetSize() const {
+        return impl->GetSize();
+    }
 
 private:
+    void Register();
     void Open(Kernel::HLERequestContext& ctx);
 
-    std::vector<u8> buffer;
-
-    friend class IStorageAccessor;
+    std::shared_ptr<IStorageImpl> impl;
 };
 
 class IStorageAccessor final : public ServiceFramework<IStorageAccessor> {

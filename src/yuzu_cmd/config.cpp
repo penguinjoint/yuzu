@@ -12,6 +12,7 @@
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/settings.h"
 #include "input_common/main.h"
+#include "input_common/udp/client.h"
 #include "yuzu_cmd/config.h"
 #include "yuzu_cmd/default_ini.h"
 
@@ -297,6 +298,10 @@ void Config::ReadValues() {
         sdl2_config->GetInteger("ControlsGeneral", "touch_diameter_x", 15);
     Settings::values.touchscreen.diameter_y =
         sdl2_config->GetInteger("ControlsGeneral", "touch_diameter_y", 15);
+    Settings::values.udp_input_address =
+        sdl2_config->Get("Controls", "udp_input_address", InputCommon::CemuhookUDP::DEFAULT_ADDR);
+    Settings::values.udp_input_port = static_cast<u16>(sdl2_config->GetInteger(
+        "Controls", "udp_input_port", InputCommon::CemuhookUDP::DEFAULT_PORT));
 
     std::transform(keyboard_keys.begin(), keyboard_keys.end(),
                    Settings::values.keyboard_keys.begin(), InputCommon::GenerateKeyboardParam);
@@ -366,8 +371,18 @@ void Config::ReadValues() {
     Settings::values.use_multi_core = sdl2_config->GetBoolean("Core", "use_multi_core", false);
 
     // Renderer
+    const int renderer_backend = sdl2_config->GetInteger(
+        "Renderer", "backend", static_cast<int>(Settings::RendererBackend::OpenGL));
+    Settings::values.renderer_backend = static_cast<Settings::RendererBackend>(renderer_backend);
+    Settings::values.renderer_debug = sdl2_config->GetBoolean("Renderer", "debug", false);
+    Settings::values.vulkan_device = sdl2_config->GetInteger("Renderer", "vulkan_device", 0);
+
     Settings::values.resolution_factor =
         static_cast<float>(sdl2_config->GetReal("Renderer", "resolution_factor", 1.0));
+    Settings::values.aspect_ratio =
+        static_cast<int>(sdl2_config->GetInteger("Renderer", "aspect_ratio", 0));
+    Settings::values.max_anisotropy =
+        static_cast<int>(sdl2_config->GetInteger("Renderer", "max_anisotropy", 0));
     Settings::values.use_frame_limit = sdl2_config->GetBoolean("Renderer", "use_frame_limit", true);
     Settings::values.frame_limit =
         static_cast<u16>(sdl2_config->GetInteger("Renderer", "frame_limit", 100));
@@ -377,6 +392,8 @@ void Config::ReadValues() {
         sdl2_config->GetBoolean("Renderer", "use_accurate_gpu_emulation", false);
     Settings::values.use_asynchronous_gpu_emulation =
         sdl2_config->GetBoolean("Renderer", "use_asynchronous_gpu_emulation", false);
+    Settings::values.use_vsync =
+        static_cast<u16>(sdl2_config->GetInteger("Renderer", "use_vsync", 1));
 
     Settings::values.bg_red = static_cast<float>(sdl2_config->GetReal("Renderer", "bg_red", 0.0));
     Settings::values.bg_green =
@@ -435,7 +452,7 @@ void Config::ReadValues() {
     Settings::values.yuzu_token = sdl2_config->Get("WebService", "yuzu_token", "");
 
     // Services
-    Settings::values.bcat_backend = sdl2_config->Get("Services", "bcat_backend", "boxcat");
+    Settings::values.bcat_backend = sdl2_config->Get("Services", "bcat_backend", "null");
     Settings::values.bcat_boxcat_local =
         sdl2_config->GetBoolean("Services", "bcat_boxcat_local", false);
 }

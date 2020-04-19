@@ -7,21 +7,21 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+
 #include <QImage>
 #include <QThread>
 #include <QWidget>
+#include <QWindow>
+
+#include "common/thread.h"
 #include "core/core.h"
 #include "core/frontend/emu_window.h"
 
-class QKeyEvent;
-class QScreen;
-class QTouchEvent;
-
-class GGLWidgetInternal;
-class GMainWindow;
 class GRenderWindow;
-class QSurface;
-class QOpenGLContext;
+class GMainWindow;
+class QKeyEvent;
+class QTouchEvent;
+class QStringList;
 
 namespace VideoCore {
 enum class LoadCallbackStage;
@@ -31,7 +31,7 @@ class EmuThread final : public QThread {
     Q_OBJECT
 
 public:
-    explicit EmuThread(GRenderWindow* render_window);
+    explicit EmuThread();
     ~EmuThread() override;
 
     /**
@@ -85,8 +85,6 @@ private:
     std::mutex running_mutex;
     std::condition_variable running_cv;
 
-    GRenderWindow* render_window;
-
 signals:
     /**
      * Emitted when the CPU has halted execution
@@ -118,37 +116,43 @@ public:
     GRenderWindow(GMainWindow* parent, EmuThread* emu_thread);
     ~GRenderWindow() override;
 
-    // EmuWindow implementation
-    void SwapBuffers() override;
-    void MakeCurrent() override;
-    void DoneCurrent() override;
+    // EmuWindow implementation.
     void PollEvents() override;
+    bool IsShown() const override;
     std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override;
-
-    void ForwardKeyPressEvent(QKeyEvent* event);
-    void ForwardKeyReleaseEvent(QKeyEvent* event);
 
     void BackupGeometry();
     void RestoreGeometry();
     void restoreGeometry(const QByteArray& geometry); // overridden
     QByteArray saveGeometry();                        // overridden
 
-    qreal GetWindowPixelRatio() const;
-    std::pair<u32, u32> ScaleTouch(QPointF pos) const;
+    qreal windowPixelRatio() const;
 
     void closeEvent(QCloseEvent* event) override;
+
+    void resizeEvent(QResizeEvent* event) override;
+
+    void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
+
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+
     bool event(QEvent* event) override;
+
     void focusOutEvent(QFocusEvent* event) override;
 
-    void OnClientAreaResized(u32 width, u32 height);
+    bool InitRenderTarget();
 
-    void InitRenderTarget();
+    /// Destroy the previous run's child_widget which should also destroy the child_window
+    void ReleaseRenderTarget();
 
     void CaptureScreenshot(u32 res_scale, const QString& screenshot_path);
 
-public slots:
-    void moveContext(); // overridden
+    std::pair<u32, u32> ScaleTouch(const QPointF& pos) const;
 
+public slots:
     void OnEmulationStarting(EmuThread* emu_thread);
     void OnEmulationStopping();
     void OnFramebufferSizeChanged();
@@ -165,20 +169,24 @@ private:
 
     void OnMinimalClientAreaChangeRequest(std::pair<u32, u32> minimal_size) override;
 
-    QWidget* container = nullptr;
-    GGLWidgetInternal* child = nullptr;
-
-    QByteArray geometry;
+    bool InitializeOpenGL();
+    bool InitializeVulkan();
+    bool LoadOpenGL();
+    QStringList GetUnsupportedGLExtensions() const;
 
     EmuThread* emu_thread;
-    // Context that backs the GGLWidgetInternal (and will be used by core to render)
-    std::unique_ptr<QOpenGLContext> context;
-    // Context that will be shared between all newly created contexts. This should never be made
-    // current
-    std::unique_ptr<QOpenGLContext> shared_context;
+
+    // Main context that will be shared with all other contexts that are requested.
+    // If this is used in a shared context setting, then this should not be used directly, but
+    // should instead be shared from
+    std::shared_ptr<Core::Frontend::GraphicsContext> main_context;
 
     /// Temporary storage of the screenshot taken
     QImage screenshot_image;
+
+    QByteArray geometry;
+
+    QWidget* child_widget = nullptr;
 
     bool first_frame = false;
 

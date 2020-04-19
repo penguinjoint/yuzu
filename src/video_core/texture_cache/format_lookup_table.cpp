@@ -41,7 +41,7 @@ struct Table {
     ComponentType alpha_component;
     bool is_srgb;
 };
-constexpr std::array<Table, 74> DefinitionTable = {{
+constexpr std::array<Table, 76> DefinitionTable = {{
     {TextureFormat::A8R8G8B8, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::ABGR8U},
     {TextureFormat::A8R8G8B8, C, SNORM, SNORM, SNORM, SNORM, PixelFormat::ABGR8S},
     {TextureFormat::A8R8G8B8, C, UINT, UINT, UINT, UINT, PixelFormat::ABGR8UI},
@@ -61,6 +61,7 @@ constexpr std::array<Table, 74> DefinitionTable = {{
     {TextureFormat::G8R8, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::RG8U},
     {TextureFormat::G8R8, C, SNORM, SNORM, SNORM, SNORM, PixelFormat::RG8S},
 
+    {TextureFormat::R16_G16_B16_A16, C, SNORM, SNORM, SNORM, SNORM, PixelFormat::RGBA16S},
     {TextureFormat::R16_G16_B16_A16, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::RGBA16U},
     {TextureFormat::R16_G16_B16_A16, C, FLOAT, FLOAT, FLOAT, FLOAT, PixelFormat::RGBA16F},
     {TextureFormat::R16_G16_B16_A16, C, UINT, UINT, UINT, UINT, PixelFormat::RGBA16UI},
@@ -89,13 +90,14 @@ constexpr std::array<Table, 74> DefinitionTable = {{
 
     {TextureFormat::R32, C, FLOAT, FLOAT, FLOAT, FLOAT, PixelFormat::R32F},
     {TextureFormat::R32, C, UINT, UINT, UINT, UINT, PixelFormat::R32UI},
+    {TextureFormat::R32, C, SINT, SINT, SINT, SINT, PixelFormat::R32I},
 
     {TextureFormat::E5B9G9R9_SHAREDEXP, C, FLOAT, FLOAT, FLOAT, FLOAT, PixelFormat::E5B9G9R9F},
 
     {TextureFormat::ZF32, C, FLOAT, FLOAT, FLOAT, FLOAT, PixelFormat::Z32F},
     {TextureFormat::Z16, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::Z16},
     {TextureFormat::S8Z24, C, UINT, UNORM, UNORM, UNORM, PixelFormat::S8Z24},
-    {TextureFormat::ZF32_X24S8, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::Z32FS8},
+    {TextureFormat::ZF32_X24S8, C, FLOAT, UINT, UNORM, UNORM, PixelFormat::Z32FS8},
 
     {TextureFormat::DXT1, C, UNORM, UNORM, UNORM, UNORM, PixelFormat::DXT1},
     {TextureFormat::DXT1, S, UNORM, UNORM, UNORM, UNORM, PixelFormat::DXT1_SRGB},

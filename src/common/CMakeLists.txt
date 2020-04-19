@@ -15,6 +15,10 @@ endif ()
 if (DEFINED ENV{DISPLAYVERSION})
   set(DISPLAY_VERSION $ENV{DISPLAYVERSION})
 endif ()
+
+# Pass the path to git to the GenerateSCMRev.cmake as well
+find_package(Git QUIET)
+
 add_custom_command(OUTPUT scm_rev.cpp
     COMMAND ${CMAKE_COMMAND}
       -DSRC_DIR="${CMAKE_SOURCE_DIR}"
@@ -23,6 +27,7 @@ add_custom_command(OUTPUT scm_rev.cpp
       -DTITLE_BAR_FORMAT_RUNNING="${TITLE_BAR_FORMAT_RUNNING}"
       -DBUILD_TAG="${BUILD_TAG}"
       -DBUILD_ID="${DISPLAY_VERSION}"
+      -DGIT_EXECUTABLE="${GIT_EXECUTABLE}"
       -P "${CMAKE_SOURCE_DIR}/CMakeModules/GenerateSCMRev.cmake"
     DEPENDS
       # WARNING! It was too much work to try and make a common location for this list,
@@ -33,8 +38,6 @@ add_custom_command(OUTPUT scm_rev.cpp
       "${VIDEO_CORE}/renderer_opengl/gl_shader_decompiler.h"
       "${VIDEO_CORE}/renderer_opengl/gl_shader_disk_cache.cpp"
       "${VIDEO_CORE}/renderer_opengl/gl_shader_disk_cache.h"
-      "${VIDEO_CORE}/renderer_opengl/gl_shader_gen.cpp"
-      "${VIDEO_CORE}/renderer_opengl/gl_shader_gen.h"
       "${VIDEO_CORE}/shader/decode/arithmetic.cpp"
       "${VIDEO_CORE}/shader/decode/arithmetic_half.cpp"
       "${VIDEO_CORE}/shader/decode/arithmetic_half_immediate.cpp"
@@ -67,8 +70,6 @@ add_custom_command(OUTPUT scm_rev.cpp
       "${VIDEO_CORE}/shader/ast.h"
       "${VIDEO_CORE}/shader/compiler_settings.cpp"
       "${VIDEO_CORE}/shader/compiler_settings.h"
-      "${VIDEO_CORE}/shader/const_buffer_locker.cpp"
-      "${VIDEO_CORE}/shader/const_buffer_locker.h"
       "${VIDEO_CORE}/shader/control_flow.cpp"
       "${VIDEO_CORE}/shader/control_flow.h"
       "${VIDEO_CORE}/shader/decode.cpp"
@@ -77,9 +78,13 @@ add_custom_command(OUTPUT scm_rev.cpp
       "${VIDEO_CORE}/shader/node.h"
       "${VIDEO_CORE}/shader/node_helper.cpp"
       "${VIDEO_CORE}/shader/node_helper.h"
+      "${VIDEO_CORE}/shader/registry.cpp"
+      "${VIDEO_CORE}/shader/registry.h"
       "${VIDEO_CORE}/shader/shader_ir.cpp"
       "${VIDEO_CORE}/shader/shader_ir.h"
       "${VIDEO_CORE}/shader/track.cpp"
+      "${VIDEO_CORE}/shader/transform_feedback.cpp"
+      "${VIDEO_CORE}/shader/transform_feedback.h"
       # and also check that the scm_rev files haven't changed
       "${CMAKE_CURRENT_SOURCE_DIR}/scm_rev.cpp.in"
       "${CMAKE_CURRENT_SOURCE_DIR}/scm_rev.h"
@@ -101,6 +106,8 @@ add_library(common STATIC
     common_funcs.h
     common_paths.h
     common_types.h
+    dynamic_library.cpp
+    dynamic_library.h
     file_util.cpp
     file_util.h
     hash.h
@@ -148,6 +155,8 @@ add_library(common STATIC
     uuid.cpp
     uuid.h
     vector_math.h
+    virtual_buffer.cpp
+    virtual_buffer.h
     web_result.h
     zstd_compression.cpp
     zstd_compression.h

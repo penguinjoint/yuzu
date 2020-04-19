@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <optional>
@@ -12,12 +13,14 @@
 #include <utility>
 #include "common/common_types.h"
 #include "common/threadsafe_queue.h"
-#include "video_core/renderer_vulkan/declarations.h"
+#include "video_core/renderer_vulkan/wrapper.h"
 
 namespace Vulkan {
 
+class StateTracker;
 class VKDevice;
 class VKFence;
+class VKQueryCache;
 class VKResourceManager;
 
 class VKFenceView {
@@ -41,14 +44,15 @@ private:
 /// OpenGL-like operations on Vulkan command buffers.
 class VKScheduler {
 public:
-    explicit VKScheduler(const VKDevice& device, VKResourceManager& resource_manager);
+    explicit VKScheduler(const VKDevice& device, VKResourceManager& resource_manager,
+                         StateTracker& state_tracker);
     ~VKScheduler();
 
     /// Sends the current execution context to the GPU.
-    void Flush(bool release_fence = true, vk::Semaphore semaphore = nullptr);
+    void Flush(bool release_fence = true, VkSemaphore semaphore = nullptr);
 
     /// Sends the current execution context to the GPU and waits for it to complete.
-    void Finish(bool release_fence = true, vk::Semaphore semaphore = nullptr);
+    void Finish(bool release_fence = true, VkSemaphore semaphore = nullptr);
 
     /// Waits for the worker thread to finish executing everything. After this function returns it's
     /// safe to touch worker resources.
@@ -58,43 +62,19 @@ public:
     void DispatchWork();
 
     /// Requests to begin a renderpass.
-    void RequestRenderpass(const vk::RenderPassBeginInfo& renderpass_bi);
+    void RequestRenderpass(VkRenderPass renderpass, VkFramebuffer framebuffer,
+                           VkExtent2D render_area);
 
     /// Requests the current executino context to be able to execute operations only allowed outside
     /// of a renderpass.
     void RequestOutsideRenderPassOperationContext();
 
     /// Binds a pipeline to the current execution context.
-    void BindGraphicsPipeline(vk::Pipeline pipeline);
+    void BindGraphicsPipeline(VkPipeline pipeline);
 
-    /// Returns true when viewports have been set in the current command buffer.
-    bool TouchViewports() {
-        return std::exchange(state.viewports, true);
-    }
-
-    /// Returns true when scissors have been set in the current command buffer.
-    bool TouchScissors() {
-        return std::exchange(state.scissors, true);
-    }
-
-    /// Returns true when depth bias have been set in the current command buffer.
-    bool TouchDepthBias() {
-        return std::exchange(state.depth_bias, true);
-    }
-
-    /// Returns true when blend constants have been set in the current command buffer.
-    bool TouchBlendConstants() {
-        return std::exchange(state.blend_constants, true);
-    }
-
-    /// Returns true when depth bounds have been set in the current command buffer.
-    bool TouchDepthBounds() {
-        return std::exchange(state.depth_bounds, true);
-    }
-
-    /// Returns true when stencil values have been set in the current command buffer.
-    bool TouchStencilValues() {
-        return std::exchange(state.stencil_values, true);
+    /// Assigns the query cache.
+    void SetQueryCache(VKQueryCache& query_cache_) {
+        query_cache = &query_cache_;
     }
 
     /// Send work to a separate thread.
@@ -112,13 +92,17 @@ public:
         return current_fence;
     }
 
+    /// Returns the current command buffer tick.
+    u64 Ticks() const {
+        return ticks;
+    }
+
 private:
     class Command {
     public:
         virtual ~Command() = default;
 
-        virtual void Execute(vk::CommandBuffer cmdbuf,
-                             const vk::DispatchLoaderDynamic& dld) const = 0;
+        virtual void Execute(vk::CommandBuffer cmdbuf) const = 0;
 
         Command* GetNext() const {
             return next;
@@ -141,9 +125,8 @@ private:
         TypedCommand(TypedCommand&&) = delete;
         TypedCommand& operator=(TypedCommand&&) = delete;
 
-        void Execute(vk::CommandBuffer cmdbuf,
-                     const vk::DispatchLoaderDynamic& dld) const override {
-            command(cmdbuf, dld);
+        void Execute(vk::CommandBuffer cmdbuf) const override {
+            command(cmdbuf);
         }
 
     private:
@@ -152,7 +135,7 @@ private:
 
     class CommandChunk final {
     public:
-        void ExecuteAll(vk::CommandBuffer cmdbuf, const vk::DispatchLoaderDynamic& dld);
+        void ExecuteAll(vk::CommandBuffer cmdbuf);
 
         template <typename T>
         bool Record(T& command) {
@@ -191,7 +174,7 @@ private:
 
     void WorkerThread();
 
-    void SubmitExecution(vk::Semaphore semaphore);
+    void SubmitExecution(VkSemaphore semaphore);
 
     void AllocateNewContext();
 
@@ -205,19 +188,19 @@ private:
 
     const VKDevice& device;
     VKResourceManager& resource_manager;
+    StateTracker& state_tracker;
+
+    VKQueryCache* query_cache = nullptr;
+
     vk::CommandBuffer current_cmdbuf;
     VKFence* current_fence = nullptr;
     VKFence* next_fence = nullptr;
 
     struct State {
-        std::optional<vk::RenderPassBeginInfo> renderpass;
-        vk::Pipeline graphics_pipeline;
-        bool viewports = false;
-        bool scissors = false;
-        bool depth_bias = false;
-        bool blend_constants = false;
-        bool depth_bounds = false;
-        bool stencil_values = false;
+        VkRenderPass renderpass = nullptr;
+        VkFramebuffer framebuffer = nullptr;
+        VkExtent2D render_area = {0, 0};
+        VkPipeline graphics_pipeline = nullptr;
     } state;
 
     std::unique_ptr<CommandChunk> chunk;
@@ -227,6 +210,7 @@ private:
     Common::SPSCQueue<std::unique_ptr<CommandChunk>> chunk_reserve;
     std::mutex mutex;
     std::condition_variable cv;
+    std::atomic<u64> ticks = 0;
     bool quit = false;
 };
 

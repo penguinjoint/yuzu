@@ -91,7 +91,8 @@ std::pair<std::vector<u8>, std::string> GetGameListCachedObject(
             return generator();
         }
 
-        if (file1.write(reinterpret_cast<const char*>(icon.data()), icon.size()) != icon.size()) {
+        if (file1.write(reinterpret_cast<const char*>(icon.data()), icon.size()) !=
+            s64(icon.size())) {
             LOG_ERROR(Frontend, "Failed to write data to cache file.");
             return generator();
         }
@@ -298,8 +299,7 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::string& dir_pa
             }
 
             const auto file_type = loader->GetFileType();
-            if ((file_type == Loader::FileType::Unknown || file_type == Loader::FileType::Error) &&
-                !UISettings::values.show_unknown) {
+            if (file_type == Loader::FileType::Unknown || file_type == Loader::FileType::Error) {
                 return true;
             }
 

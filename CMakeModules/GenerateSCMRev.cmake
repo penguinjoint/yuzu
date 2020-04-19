@@ -5,6 +5,10 @@ function(get_timestamp _var)
 endfunction()
 
 list(APPEND CMAKE_MODULE_PATH "${SRC_DIR}/externals/cmake-modules")
+
+# Find the package here with the known path so that the GetGit commands can find it as well
+find_package(Git QUIET PATHS "${GIT_EXECUTABLE}")
+
 # generate git/build information
 include(GetGitRevisionDescription)
 get_git_head_revision(GIT_REF_SPEC GIT_REV)
@@ -53,8 +57,6 @@ set(HASH_FILES
     "${VIDEO_CORE}/renderer_opengl/gl_shader_decompiler.h"
     "${VIDEO_CORE}/renderer_opengl/gl_shader_disk_cache.cpp"
     "${VIDEO_CORE}/renderer_opengl/gl_shader_disk_cache.h"
-    "${VIDEO_CORE}/renderer_opengl/gl_shader_gen.cpp"
-    "${VIDEO_CORE}/renderer_opengl/gl_shader_gen.h"
     "${VIDEO_CORE}/shader/decode/arithmetic.cpp"
     "${VIDEO_CORE}/shader/decode/arithmetic_half.cpp"
     "${VIDEO_CORE}/shader/decode/arithmetic_half_immediate.cpp"
@@ -87,8 +89,6 @@ set(HASH_FILES
     "${VIDEO_CORE}/shader/ast.h"
     "${VIDEO_CORE}/shader/compiler_settings.cpp"
     "${VIDEO_CORE}/shader/compiler_settings.h"
-    "${VIDEO_CORE}/shader/const_buffer_locker.cpp"
-    "${VIDEO_CORE}/shader/const_buffer_locker.h"
     "${VIDEO_CORE}/shader/control_flow.cpp"
     "${VIDEO_CORE}/shader/control_flow.h"
     "${VIDEO_CORE}/shader/decode.cpp"
@@ -97,9 +97,13 @@ set(HASH_FILES
     "${VIDEO_CORE}/shader/node.h"
     "${VIDEO_CORE}/shader/node_helper.cpp"
     "${VIDEO_CORE}/shader/node_helper.h"
+    "${VIDEO_CORE}/shader/registry.cpp"
+    "${VIDEO_CORE}/shader/registry.h"
     "${VIDEO_CORE}/shader/shader_ir.cpp"
     "${VIDEO_CORE}/shader/shader_ir.h"
     "${VIDEO_CORE}/shader/track.cpp"
+    "${VIDEO_CORE}/shader/transform_feedback.cpp"
+    "${VIDEO_CORE}/shader/transform_feedback.h"
 )
 set(COMBINED "")
 foreach (F IN LISTS HASH_FILES)

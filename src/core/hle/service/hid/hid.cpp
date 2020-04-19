@@ -10,9 +10,11 @@
 #include "core/core_timing_util.h"
 #include "core/frontend/emu_window.h"
 #include "core/frontend/input.h"
+#include "core/hardware_properties.h"
 #include "core/hle/ipc_helpers.h"
 #include "core/hle/kernel/client_port.h"
 #include "core/hle/kernel/client_session.h"
+#include "core/hle/kernel/kernel.h"
 #include "core/hle/kernel/readable_event.h"
 #include "core/hle/kernel/shared_memory.h"
 #include "core/hle/kernel/writable_event.h"
@@ -37,11 +39,11 @@ namespace Service::HID {
 
 // Updating period for each HID device.
 // TODO(ogniK): Find actual polling rate of hid
-constexpr s64 pad_update_ticks = static_cast<s64>(Core::Timing::BASE_CLOCK_RATE / 66);
+constexpr s64 pad_update_ticks = static_cast<s64>(Core::Hardware::BASE_CLOCK_RATE / 66);
 [[maybe_unused]] constexpr s64 accelerometer_update_ticks =
-    static_cast<s64>(Core::Timing::BASE_CLOCK_RATE / 100);
+    static_cast<s64>(Core::Hardware::BASE_CLOCK_RATE / 100);
 [[maybe_unused]] constexpr s64 gyroscope_update_ticks =
-    static_cast<s64>(Core::Timing::BASE_CLOCK_RATE / 100);
+    static_cast<s64>(Core::Hardware::BASE_CLOCK_RATE / 100);
 constexpr std::size_t SHARED_MEMORY_SIZE = 0x40000;
 
 IAppletResource::IAppletResource(Core::System& system)
@@ -52,9 +54,7 @@ IAppletResource::IAppletResource(Core::System& system)
     RegisterHandlers(functions);
 
     auto& kernel = system.Kernel();
-    shared_mem = Kernel::SharedMemory::Create(
-        kernel, nullptr, SHARED_MEMORY_SIZE, Kernel::MemoryPermission::ReadWrite,
-        Kernel::MemoryPermission::Read, 0, Kernel::MemoryRegion::BASE, "HID:SharedMemory");
+    shared_mem = SharedFrom(&kernel.GetHidSharedMem());
 
     MakeController<Controller_DebugPad>(HidController::DebugPad);
     MakeController<Controller_Touchscreen>(HidController::Touchscreen);
@@ -234,7 +234,7 @@ Hid::Hid(Core::System& system) : ServiceFramework("hid"), system(system) {
         {303, nullptr, "ActivateSevenSixAxisSensor"},
         {304, nullptr, "StartSevenSixAxisSensor"},
         {305, nullptr, "StopSevenSixAxisSensor"},
-        {306, nullptr, "InitializeSevenSixAxisSensor"},
+        {306, &Hid::InitializeSevenSixAxisSensor, "InitializeSevenSixAxisSensor"},
         {307, nullptr, "FinalizeSevenSixAxisSensor"},
         {308, nullptr, "SetSevenSixAxisSensorFusionStrength"},
         {309, nullptr, "GetSevenSixAxisSensorFusionStrength"},
@@ -847,6 +847,13 @@ void Hid::SetPalmaBoostMode(Kernel::HLERequestContext& ctx) {
     const auto unknown{rp.Pop<u32>()};
 
     LOG_WARNING(Service_HID, "(STUBBED) called, unknown={}", unknown);
+
+    IPC::ResponseBuilder rb{ctx, 2};
+    rb.Push(RESULT_SUCCESS);
+}
+
+void Hid::InitializeSevenSixAxisSensor(Kernel::HLERequestContext& ctx) {
+    LOG_WARNING(Service_HID, "(STUBBED) called");
 
     IPC::ResponseBuilder rb{ctx, 2};
     rb.Push(RESULT_SUCCESS);

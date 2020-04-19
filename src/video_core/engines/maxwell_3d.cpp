@@ -4,17 +4,20 @@
 
 #include <cinttypes>
 #include <cstring>
+#include <optional>
 #include "common/assert.h"
 #include "core/core.h"
 #include "core/core_timing.h"
-#include "video_core/debug_utils/debug_utils.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/shader_type.h"
+#include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/textures/texture.h"
 
 namespace Tegra::Engines {
+
+using VideoCore::QueryType;
 
 /// First register id that is actually a Macro call.
 constexpr u32 MacroRegistersStart = 0xE00;
@@ -23,7 +26,8 @@ Maxwell3D::Maxwell3D(Core::System& system, VideoCore::RasterizerInterface& raste
                      MemoryManager& memory_manager)
     : system{system}, rasterizer{rasterizer}, memory_manager{memory_manager},
       macro_interpreter{*this}, upload_state{memory_manager, regs.upload} {
-    InitDirtySettings();
+    dirty.flags.flip();
+
     InitializeRegisterDefaults();
 }
 
@@ -72,8 +76,8 @@ void Maxwell3D::InitializeRegisterDefaults() {
     regs.stencil_back_mask = 0xFFFFFFFF;
 
     regs.depth_test_func = Regs::ComparisonOp::Always;
-    regs.cull.front_face = Regs::Cull::FrontFace::CounterClockWise;
-    regs.cull.cull_face = Regs::Cull::CullFace::Back;
+    regs.front_face = Regs::FrontFace::CounterClockWise;
+    regs.cull_face = Regs::CullFace::Back;
 
     // TODO(Rodrigo): Most games do not set a point size. I think this is a case of a
     // register carrying a default value. Assume it's OpenGL's default (1).
@@ -92,169 +96,14 @@ void Maxwell3D::InitializeRegisterDefaults() {
     regs.rasterize_enable = 1;
     regs.rt_separate_frag_data = 1;
     regs.framebuffer_srgb = 1;
+    regs.front_face = Maxwell3D::Regs::FrontFace::ClockWise;
+
+    shadow_state = regs;
 
     mme_inline[MAXWELL3D_REG_INDEX(draw.vertex_end_gl)] = true;
     mme_inline[MAXWELL3D_REG_INDEX(draw.vertex_begin_gl)] = true;
     mme_inline[MAXWELL3D_REG_INDEX(vertex_buffer.count)] = true;
     mme_inline[MAXWELL3D_REG_INDEX(index_array.count)] = true;
-}
-
-#define DIRTY_REGS_POS(field_name) static_cast<u8>(offsetof(Maxwell3D::DirtyRegs, field_name))
-
-void Maxwell3D::InitDirtySettings() {
-    const auto set_block = [this](std::size_t start, std::size_t range, u8 position) {
-        const auto start_itr = dirty_pointers.begin() + start;
-        const auto end_itr = start_itr + range;
-        std::fill(start_itr, end_itr, position);
-    };
-    dirty.regs.fill(true);
-
-    // Init Render Targets
-    constexpr u32 registers_per_rt = sizeof(regs.rt[0]) / sizeof(u32);
-    constexpr u32 rt_start_reg = MAXWELL3D_REG_INDEX(rt);
-    constexpr u32 rt_end_reg = rt_start_reg + registers_per_rt * 8;
-    u8 rt_dirty_reg = DIRTY_REGS_POS(render_target);
-    for (u32 rt_reg = rt_start_reg; rt_reg < rt_end_reg; rt_reg += registers_per_rt) {
-        set_block(rt_reg, registers_per_rt, rt_dirty_reg);
-        ++rt_dirty_reg;
-    }
-    constexpr u32 depth_buffer_flag = DIRTY_REGS_POS(depth_buffer);
-    dirty_pointers[MAXWELL3D_REG_INDEX(zeta_enable)] = depth_buffer_flag;
-    dirty_pointers[MAXWELL3D_REG_INDEX(zeta_width)] = depth_buffer_flag;
-    dirty_pointers[MAXWELL3D_REG_INDEX(zeta_height)] = depth_buffer_flag;
-    constexpr u32 registers_in_zeta = sizeof(regs.zeta) / sizeof(u32);
-    constexpr u32 zeta_reg = MAXWELL3D_REG_INDEX(zeta);
-    set_block(zeta_reg, registers_in_zeta, depth_buffer_flag);
-
-    // Init Vertex Arrays
-    constexpr u32 vertex_array_start = MAXWELL3D_REG_INDEX(vertex_array);
-    constexpr u32 vertex_array_size = sizeof(regs.vertex_array[0]) / sizeof(u32);
-    constexpr u32 vertex_array_end = vertex_array_start + vertex_array_size * Regs::NumVertexArrays;
-    u8 va_dirty_reg = DIRTY_REGS_POS(vertex_array);
-    u8 vi_dirty_reg = DIRTY_REGS_POS(vertex_instance);
-    for (u32 vertex_reg = vertex_array_start; vertex_reg < vertex_array_end;
-         vertex_reg += vertex_array_size) {
-        set_block(vertex_reg, 3, va_dirty_reg);
-        // The divisor concerns vertex array instances
-        dirty_pointers[static_cast<std::size_t>(vertex_reg) + 3] = vi_dirty_reg;
-        ++va_dirty_reg;
-        ++vi_dirty_reg;
-    }
-    constexpr u32 vertex_limit_start = MAXWELL3D_REG_INDEX(vertex_array_limit);
-    constexpr u32 vertex_limit_size = sizeof(regs.vertex_array_limit[0]) / sizeof(u32);
-    constexpr u32 vertex_limit_end = vertex_limit_start + vertex_limit_size * Regs::NumVertexArrays;
-    va_dirty_reg = DIRTY_REGS_POS(vertex_array);
-    for (u32 vertex_reg = vertex_limit_start; vertex_reg < vertex_limit_end;
-         vertex_reg += vertex_limit_size) {
-        set_block(vertex_reg, vertex_limit_size, va_dirty_reg);
-        va_dirty_reg++;
-    }
-    constexpr u32 vertex_instance_start = MAXWELL3D_REG_INDEX(instanced_arrays);
-    constexpr u32 vertex_instance_size =
-        sizeof(regs.instanced_arrays.is_instanced[0]) / sizeof(u32);
-    constexpr u32 vertex_instance_end =
-        vertex_instance_start + vertex_instance_size * Regs::NumVertexArrays;
-    vi_dirty_reg = DIRTY_REGS_POS(vertex_instance);
-    for (u32 vertex_reg = vertex_instance_start; vertex_reg < vertex_instance_end;
-         vertex_reg += vertex_instance_size) {
-        set_block(vertex_reg, vertex_instance_size, vi_dirty_reg);
-        vi_dirty_reg++;
-    }
-    set_block(MAXWELL3D_REG_INDEX(vertex_attrib_format), regs.vertex_attrib_format.size(),
-              DIRTY_REGS_POS(vertex_attrib_format));
-
-    // Init Shaders
-    constexpr u32 shader_registers_count =
-        sizeof(regs.shader_config[0]) * Regs::MaxShaderProgram / sizeof(u32);
-    set_block(MAXWELL3D_REG_INDEX(shader_config[0]), shader_registers_count,
-              DIRTY_REGS_POS(shaders));
-
-    // State
-
-    // Viewport
-    constexpr u8 viewport_dirty_reg = DIRTY_REGS_POS(viewport);
-    constexpr u32 viewport_start = MAXWELL3D_REG_INDEX(viewports);
-    constexpr u32 viewport_size = sizeof(regs.viewports) / sizeof(u32);
-    set_block(viewport_start, viewport_size, viewport_dirty_reg);
-    constexpr u32 view_volume_start = MAXWELL3D_REG_INDEX(view_volume_clip_control);
-    constexpr u32 view_volume_size = sizeof(regs.view_volume_clip_control) / sizeof(u32);
-    set_block(view_volume_start, view_volume_size, viewport_dirty_reg);
-
-    // Viewport transformation
-    constexpr u32 viewport_trans_start = MAXWELL3D_REG_INDEX(viewport_transform);
-    constexpr u32 viewport_trans_size = sizeof(regs.viewport_transform) / sizeof(u32);
-    set_block(viewport_trans_start, viewport_trans_size, DIRTY_REGS_POS(viewport_transform));
-
-    // Cullmode
-    constexpr u32 cull_mode_start = MAXWELL3D_REG_INDEX(cull);
-    constexpr u32 cull_mode_size = sizeof(regs.cull) / sizeof(u32);
-    set_block(cull_mode_start, cull_mode_size, DIRTY_REGS_POS(cull_mode));
-
-    // Screen y control
-    dirty_pointers[MAXWELL3D_REG_INDEX(screen_y_control)] = DIRTY_REGS_POS(screen_y_control);
-
-    // Primitive Restart
-    constexpr u32 primitive_restart_start = MAXWELL3D_REG_INDEX(primitive_restart);
-    constexpr u32 primitive_restart_size = sizeof(regs.primitive_restart) / sizeof(u32);
-    set_block(primitive_restart_start, primitive_restart_size, DIRTY_REGS_POS(primitive_restart));
-
-    // Depth Test
-    constexpr u8 depth_test_dirty_reg = DIRTY_REGS_POS(depth_test);
-    dirty_pointers[MAXWELL3D_REG_INDEX(depth_test_enable)] = depth_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(depth_write_enabled)] = depth_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(depth_test_func)] = depth_test_dirty_reg;
-
-    // Stencil Test
-    constexpr u32 stencil_test_dirty_reg = DIRTY_REGS_POS(stencil_test);
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_enable)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_front_func_func)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_front_func_ref)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_front_func_mask)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_front_op_fail)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_front_op_zfail)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_front_op_zpass)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_front_mask)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_two_side_enable)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_back_func_func)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_back_func_ref)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_back_func_mask)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_back_op_fail)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_back_op_zfail)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_back_op_zpass)] = stencil_test_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(stencil_back_mask)] = stencil_test_dirty_reg;
-
-    // Color Mask
-    constexpr u8 color_mask_dirty_reg = DIRTY_REGS_POS(color_mask);
-    dirty_pointers[MAXWELL3D_REG_INDEX(color_mask_common)] = color_mask_dirty_reg;
-    set_block(MAXWELL3D_REG_INDEX(color_mask), sizeof(regs.color_mask) / sizeof(u32),
-              color_mask_dirty_reg);
-    // Blend State
-    constexpr u8 blend_state_dirty_reg = DIRTY_REGS_POS(blend_state);
-    set_block(MAXWELL3D_REG_INDEX(blend_color), sizeof(regs.blend_color) / sizeof(u32),
-              blend_state_dirty_reg);
-    dirty_pointers[MAXWELL3D_REG_INDEX(independent_blend_enable)] = blend_state_dirty_reg;
-    set_block(MAXWELL3D_REG_INDEX(blend), sizeof(regs.blend) / sizeof(u32), blend_state_dirty_reg);
-    set_block(MAXWELL3D_REG_INDEX(independent_blend), sizeof(regs.independent_blend) / sizeof(u32),
-              blend_state_dirty_reg);
-
-    // Scissor State
-    constexpr u8 scissor_test_dirty_reg = DIRTY_REGS_POS(scissor_test);
-    set_block(MAXWELL3D_REG_INDEX(scissor_test), sizeof(regs.scissor_test) / sizeof(u32),
-              scissor_test_dirty_reg);
-
-    // Polygon Offset
-    constexpr u8 polygon_offset_dirty_reg = DIRTY_REGS_POS(polygon_offset);
-    dirty_pointers[MAXWELL3D_REG_INDEX(polygon_offset_fill_enable)] = polygon_offset_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(polygon_offset_line_enable)] = polygon_offset_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(polygon_offset_point_enable)] = polygon_offset_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(polygon_offset_units)] = polygon_offset_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(polygon_offset_factor)] = polygon_offset_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(polygon_offset_clamp)] = polygon_offset_dirty_reg;
-
-    // Depth bounds
-    constexpr u8 depth_bounds_values_dirty_reg = DIRTY_REGS_POS(depth_bounds_values);
-    dirty_pointers[MAXWELL3D_REG_INDEX(depth_bounds[0])] = depth_bounds_values_dirty_reg;
-    dirty_pointers[MAXWELL3D_REG_INDEX(depth_bounds[1])] = depth_bounds_values_dirty_reg;
 }
 
 void Maxwell3D::CallMacroMethod(u32 method, std::size_t num_parameters, const u32* parameters) {
@@ -273,8 +122,6 @@ void Maxwell3D::CallMacroMethod(u32 method, std::size_t num_parameters, const u3
 }
 
 void Maxwell3D::CallMethod(const GPU::MethodCall& method_call) {
-    auto debug_context = system.GetGPUDebugContext();
-
     const u32 method = method_call.method;
 
     if (method == cb_data_state.current) {
@@ -315,35 +162,34 @@ void Maxwell3D::CallMethod(const GPU::MethodCall& method_call) {
     ASSERT_MSG(method < Regs::NUM_REGS,
                "Invalid Maxwell3D register, increase the size of the Regs structure");
 
-    if (debug_context) {
-        debug_context->OnEvent(Tegra::DebugContext::Event::MaxwellCommandLoaded, nullptr);
+    u32 arg = method_call.argument;
+    // Keep track of the register value in shadow_state when requested.
+    if (shadow_state.shadow_ram_control == Regs::ShadowRamControl::Track ||
+        shadow_state.shadow_ram_control == Regs::ShadowRamControl::TrackWithFilter) {
+        shadow_state.reg_array[method] = arg;
+    } else if (shadow_state.shadow_ram_control == Regs::ShadowRamControl::Replay) {
+        arg = shadow_state.reg_array[method];
     }
 
-    if (regs.reg_array[method] != method_call.argument) {
-        regs.reg_array[method] = method_call.argument;
-        const std::size_t dirty_reg = dirty_pointers[method];
-        if (dirty_reg) {
-            dirty.regs[dirty_reg] = true;
-            if (dirty_reg >= DIRTY_REGS_POS(vertex_array) &&
-                dirty_reg < DIRTY_REGS_POS(vertex_array_buffers)) {
-                dirty.vertex_array_buffers = true;
-            } else if (dirty_reg >= DIRTY_REGS_POS(vertex_instance) &&
-                       dirty_reg < DIRTY_REGS_POS(vertex_instances)) {
-                dirty.vertex_instances = true;
-            } else if (dirty_reg >= DIRTY_REGS_POS(render_target) &&
-                       dirty_reg < DIRTY_REGS_POS(render_settings)) {
-                dirty.render_settings = true;
-            }
+    if (regs.reg_array[method] != arg) {
+        regs.reg_array[method] = arg;
+
+        for (const auto& table : dirty.tables) {
+            dirty.flags[table[method]] = true;
         }
     }
 
     switch (method) {
+    case MAXWELL3D_REG_INDEX(shadow_ram_control): {
+        shadow_state.shadow_ram_control = static_cast<Regs::ShadowRamControl>(method_call.argument);
+        break;
+    }
     case MAXWELL3D_REG_INDEX(macros.data): {
-        ProcessMacroUpload(method_call.argument);
+        ProcessMacroUpload(arg);
         break;
     }
     case MAXWELL3D_REG_INDEX(macros.bind): {
-        ProcessMacroBind(method_call.argument);
+        ProcessMacroBind(arg);
         break;
     }
     case MAXWELL3D_REG_INDEX(firmware[4]): {
@@ -405,6 +251,10 @@ void Maxwell3D::CallMethod(const GPU::MethodCall& method_call) {
         ProcessQueryCondition();
         break;
     }
+    case MAXWELL3D_REG_INDEX(counter_reset): {
+        ProcessCounterReset();
+        break;
+    }
     case MAXWELL3D_REG_INDEX(sync_info): {
         ProcessSyncPoint();
         break;
@@ -415,18 +265,14 @@ void Maxwell3D::CallMethod(const GPU::MethodCall& method_call) {
     }
     case MAXWELL3D_REG_INDEX(data_upload): {
         const bool is_last_call = method_call.IsLastCall();
-        upload_state.ProcessData(method_call.argument, is_last_call);
+        upload_state.ProcessData(arg, is_last_call);
         if (is_last_call) {
-            dirty.OnMemoryWrite();
+            OnMemoryWrite();
         }
         break;
     }
     default:
         break;
-    }
-
-    if (debug_context) {
-        debug_context->OnEvent(Tegra::DebugContext::Event::MaxwellCommandProcessed, nullptr);
     }
 }
 
@@ -485,23 +331,13 @@ void Maxwell3D::FlushMMEInlineDraw() {
     ASSERT_MSG(!(regs.index_array.count && regs.vertex_buffer.count), "Both indexed and direct?");
     ASSERT(mme_draw.instance_count == mme_draw.gl_end_count);
 
-    auto debug_context = system.GetGPUDebugContext();
-
-    if (debug_context) {
-        debug_context->OnEvent(Tegra::DebugContext::Event::IncomingPrimitiveBatch, nullptr);
-    }
-
     // Both instance configuration registers can not be set at the same time.
     ASSERT_MSG(!regs.draw.instance_next || !regs.draw.instance_cont,
                "Illegal combination of instancing parameters");
 
     const bool is_indexed = mme_draw.current_mode == MMEDrawMode::Indexed;
     if (ShouldExecute()) {
-        rasterizer.DrawMultiBatch(is_indexed);
-    }
-
-    if (debug_context) {
-        debug_context->OnEvent(Tegra::DebugContext::Event::FinishedPrimitiveBatch, nullptr);
+        rasterizer.Draw(is_indexed, true);
     }
 
     // TODO(bunnei): Below, we reset vertex count so that we can use these registers to determine if
@@ -539,61 +375,51 @@ void Maxwell3D::ProcessFirmwareCall4() {
     regs.reg_array[0xd00] = 1;
 }
 
-void Maxwell3D::ProcessQueryGet() {
-    const GPUVAddr sequence_address{regs.query.QueryAddress()};
-    // Since the sequence address is given as a GPU VAddr, we have to convert it to an application
-    // VAddr before writing.
-
-    // TODO(Subv): Support the other query units.
-    ASSERT_MSG(regs.query.query_get.unit == Regs::QueryUnit::Crop,
-               "Units other than CROP are unimplemented");
-
-    u64 result = 0;
-
-    // TODO(Subv): Support the other query variables
-    switch (regs.query.query_get.select) {
-    case Regs::QuerySelect::Zero:
-        // This seems to actually write the query sequence to the query address.
-        result = regs.query.query_sequence;
-        break;
-    default:
-        result = 1;
-        UNIMPLEMENTED_MSG("Unimplemented query select type {}",
-                          static_cast<u32>(regs.query.query_get.select.Value()));
-    }
-
-    // TODO(Subv): Research and implement how query sync conditions work.
-
+void Maxwell3D::StampQueryResult(u64 payload, bool long_query) {
     struct LongQueryResult {
         u64_le value;
         u64_le timestamp;
     };
     static_assert(sizeof(LongQueryResult) == 16, "LongQueryResult has wrong size");
+    const GPUVAddr sequence_address{regs.query.QueryAddress()};
+    if (long_query) {
+        // Write the 128-bit result structure in long mode. Note: We emulate an infinitely fast
+        // GPU, this command may actually take a while to complete in real hardware due to GPU
+        // wait queues.
+        LongQueryResult query_result{payload, system.GPU().GetTicks()};
+        memory_manager.WriteBlock(sequence_address, &query_result, sizeof(query_result));
+    } else {
+        memory_manager.Write<u32>(sequence_address, static_cast<u32>(payload));
+    }
+}
 
-    switch (regs.query.query_get.mode) {
-    case Regs::QueryMode::Write:
-    case Regs::QueryMode::Write2: {
-        u32 sequence = regs.query.query_sequence;
-        if (regs.query.query_get.short_query) {
-            // Write the current query sequence to the sequence address.
-            // TODO(Subv): Find out what happens if you use a long query type but mark it as a short
-            // query.
-            memory_manager.Write<u32>(sequence_address, sequence);
-        } else {
-            // Write the 128-bit result structure in long mode. Note: We emulate an infinitely fast
-            // GPU, this command may actually take a while to complete in real hardware due to GPU
-            // wait queues.
-            LongQueryResult query_result{};
-            query_result.value = result;
-            // TODO(Subv): Generate a real GPU timestamp and write it here instead of CoreTiming
-            query_result.timestamp = system.CoreTiming().GetTicks();
-            memory_manager.WriteBlock(sequence_address, &query_result, sizeof(query_result));
+void Maxwell3D::ProcessQueryGet() {
+    // TODO(Subv): Support the other query units.
+    ASSERT_MSG(regs.query.query_get.unit == Regs::QueryUnit::Crop,
+               "Units other than CROP are unimplemented");
+
+    switch (regs.query.query_get.operation) {
+    case Regs::QueryOperation::Release:
+        StampQueryResult(regs.query.query_sequence, regs.query.query_get.short_query == 0);
+        break;
+    case Regs::QueryOperation::Acquire:
+        // TODO(Blinkhawk): Under this operation, the GPU waits for the CPU to write a value that
+        // matches the current payload.
+        UNIMPLEMENTED_MSG("Unimplemented query operation ACQUIRE");
+        break;
+    case Regs::QueryOperation::Counter:
+        if (const std::optional<u64> result = GetQueryResult()) {
+            // If the query returns an empty optional it means it's cached and deferred.
+            // In this case we have a non-empty result, so we stamp it immediately.
+            StampQueryResult(*result, regs.query.query_get.short_query == 0);
         }
         break;
-    }
+    case Regs::QueryOperation::Trap:
+        UNIMPLEMENTED_MSG("Unimplemented query operation TRAP");
+        break;
     default:
-        UNIMPLEMENTED_MSG("Query mode {} not implemented",
-                          static_cast<u32>(regs.query.query_get.mode.Value()));
+        UNIMPLEMENTED_MSG("Unknown query operation");
+        break;
     }
 }
 
@@ -610,20 +436,20 @@ void Maxwell3D::ProcessQueryCondition() {
     }
     case Regs::ConditionMode::ResNonZero: {
         Regs::QueryCompare cmp;
-        memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
         execute_on = cmp.initial_sequence != 0U && cmp.initial_mode != 0U;
         break;
     }
     case Regs::ConditionMode::Equal: {
         Regs::QueryCompare cmp;
-        memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
         execute_on =
             cmp.initial_sequence == cmp.current_sequence && cmp.initial_mode == cmp.current_mode;
         break;
     }
     case Regs::ConditionMode::NotEqual: {
         Regs::QueryCompare cmp;
-        memory_manager.ReadBlockUnsafe(condition_address, &cmp, sizeof(cmp));
+        memory_manager.ReadBlock(condition_address, &cmp, sizeof(cmp));
         execute_on =
             cmp.initial_sequence != cmp.current_sequence || cmp.initial_mode != cmp.current_mode;
         break;
@@ -633,6 +459,18 @@ void Maxwell3D::ProcessQueryCondition() {
         execute_on = true;
         break;
     }
+    }
+}
+
+void Maxwell3D::ProcessCounterReset() {
+    switch (regs.counter_reset) {
+    case Regs::CounterReset::SampleCnt:
+        rasterizer.ResetCounter(QueryType::SamplesPassed);
+        break;
+    default:
+        LOG_WARNING(Render_OpenGL, "Unimplemented counter reset={}",
+                    static_cast<int>(regs.counter_reset));
+        break;
     }
 }
 
@@ -650,12 +488,6 @@ void Maxwell3D::DrawArrays() {
               regs.vertex_buffer.count);
     ASSERT_MSG(!(regs.index_array.count && regs.vertex_buffer.count), "Both indexed and direct?");
 
-    auto debug_context = system.GetGPUDebugContext();
-
-    if (debug_context) {
-        debug_context->OnEvent(Tegra::DebugContext::Event::IncomingPrimitiveBatch, nullptr);
-    }
-
     // Both instance configuration registers can not be set at the same time.
     ASSERT_MSG(!regs.draw.instance_next || !regs.draw.instance_cont,
                "Illegal combination of instancing parameters");
@@ -670,11 +502,7 @@ void Maxwell3D::DrawArrays() {
 
     const bool is_indexed{regs.index_array.count && !regs.vertex_buffer.count};
     if (ShouldExecute()) {
-        rasterizer.DrawBatch(is_indexed);
-    }
-
-    if (debug_context) {
-        debug_context->OnEvent(Tegra::DebugContext::Event::FinishedPrimitiveBatch, nullptr);
+        rasterizer.Draw(is_indexed, false);
     }
 
     // TODO(bunnei): Below, we reset vertex count so that we can use these registers to determine if
@@ -685,6 +513,22 @@ void Maxwell3D::DrawArrays() {
         regs.index_array.count = 0;
     } else {
         regs.vertex_buffer.count = 0;
+    }
+}
+
+std::optional<u64> Maxwell3D::GetQueryResult() {
+    switch (regs.query.query_get.select) {
+    case Regs::QuerySelect::Zero:
+        return 0;
+    case Regs::QuerySelect::SamplesPassed:
+        // Deferred.
+        rasterizer.Query(regs.query.QueryAddress(), VideoCore::QueryType::SamplesPassed,
+                         system.GPU().GetTicks());
+        return {};
+    default:
+        UNIMPLEMENTED_MSG("Unimplemented query select type {}",
+                          static_cast<u32>(regs.query.query_get.select.Value()));
+        return 1;
     }
 }
 
@@ -731,7 +575,7 @@ void Maxwell3D::FinishCBData() {
 
     const u32 id = cb_data_state.id;
     memory_manager.WriteBlock(address, cb_data_state.buffer[id].data(), size);
-    dirty.OnMemoryWrite();
+    OnMemoryWrite();
 
     cb_data_state.id = null_cb_data;
     cb_data_state.current = null_cb_data;
@@ -809,9 +653,17 @@ SamplerDescriptor Maxwell3D::AccessBindlessSampler(ShaderType stage, u64 const_b
 
     const Texture::TextureHandle tex_handle{memory_manager.Read<u32>(tex_info_address)};
     const Texture::FullTextureInfo tex_info = GetTextureInfo(tex_handle);
-    SamplerDescriptor result = SamplerDescriptor::FromTicTexture(tex_info.tic.texture_type.Value());
+    SamplerDescriptor result = SamplerDescriptor::FromTIC(tex_info.tic);
     result.is_shadow.Assign(tex_info.tsc.depth_compare_enabled.Value());
     return result;
+}
+
+VideoCore::GuestDriverProfile& Maxwell3D::AccessGuestDriverProfile() {
+    return rasterizer.AccessGuestDriverProfile();
+}
+
+const VideoCore::GuestDriverProfile& Maxwell3D::AccessGuestDriverProfile() const {
+    return rasterizer.AccessGuestDriverProfile();
 }
 
 } // namespace Tegra::Engines

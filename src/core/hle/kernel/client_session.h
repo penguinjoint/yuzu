@@ -7,12 +7,12 @@
 #include <memory>
 #include <string>
 
-#include "core/hle/kernel/wait_object.h"
+#include "core/hle/kernel/synchronization_object.h"
 #include "core/hle/result.h"
 
 union ResultCode;
 
-namespace Memory {
+namespace Core::Memory {
 class Memory;
 }
 
@@ -22,7 +22,7 @@ class KernelCore;
 class Session;
 class Thread;
 
-class ClientSession final : public WaitObject {
+class ClientSession final : public SynchronizationObject {
 public:
     explicit ClientSession(KernelCore& kernel);
     ~ClientSession() override;
@@ -42,11 +42,13 @@ public:
         return HANDLE_TYPE;
     }
 
-    ResultCode SendSyncRequest(std::shared_ptr<Thread> thread, Memory::Memory& memory);
+    ResultCode SendSyncRequest(std::shared_ptr<Thread> thread, Core::Memory::Memory& memory);
 
     bool ShouldWait(const Thread* thread) const override;
 
     void Acquire(Thread* thread) override;
+
+    bool IsSignaled() const override;
 
 private:
     static ResultVal<std::shared_ptr<ClientSession>> Create(KernelCore& kernel,

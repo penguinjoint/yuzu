@@ -6,6 +6,8 @@
 
 #include <array>
 #include <bitset>
+#include <limits>
+#include <optional>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -65,18 +67,18 @@ public:
         static constexpr std::size_t NumVaryings = 31;
         static constexpr std::size_t NumImages = 8; // TODO(Rodrigo): Investigate this number
         static constexpr std::size_t NumClipDistances = 8;
+        static constexpr std::size_t NumTransformFeedbackBuffers = 4;
         static constexpr std::size_t MaxShaderProgram = 6;
         static constexpr std::size_t MaxShaderStage = 5;
         // Maximum number of const buffers per shader stage.
         static constexpr std::size_t MaxConstBuffers = 18;
         static constexpr std::size_t MaxConstBufferSize = 0x10000;
 
-        enum class QueryMode : u32 {
-            Write = 0,
-            Sync = 1,
-            // TODO(Subv): It is currently unknown what the difference between method 2 and method 0
-            // is.
-            Write2 = 2,
+        enum class QueryOperation : u32 {
+            Release = 0,
+            Acquire = 1,
+            Counter = 2,
+            Trap = 3,
         };
 
         enum class QueryUnit : u32 {
@@ -301,12 +303,45 @@ public:
                 return (type == Type::SignedNorm) || (type == Type::UnsignedNorm);
             }
 
+            bool IsConstant() const {
+                return constant;
+            }
+
             bool IsValid() const {
                 return size != Size::Invalid;
             }
 
             bool operator<(const VertexAttribute& other) const {
                 return hex < other.hex;
+            }
+        };
+
+        struct MsaaSampleLocation {
+            union {
+                BitField<0, 4, u32> x0;
+                BitField<4, 4, u32> y0;
+                BitField<8, 4, u32> x1;
+                BitField<12, 4, u32> y1;
+                BitField<16, 4, u32> x2;
+                BitField<20, 4, u32> y2;
+                BitField<24, 4, u32> x3;
+                BitField<28, 4, u32> y3;
+            };
+
+            constexpr std::pair<u32, u32> Location(int index) const {
+                switch (index) {
+                case 0:
+                    return {x0, y0};
+                case 1:
+                    return {x1, y1};
+                case 2:
+                    return {x2, y2};
+                case 3:
+                    return {x3, y3};
+                default:
+                    UNREACHABLE();
+                    return {0, 0};
+                }
             }
         };
 
@@ -410,21 +445,36 @@ public:
             Linear = 1,
         };
 
-        struct Cull {
-            enum class FrontFace : u32 {
-                ClockWise = 0x0900,
-                CounterClockWise = 0x0901,
-            };
+        enum class CounterReset : u32 {
+            SampleCnt = 0x01,
+            Unk02 = 0x02,
+            Unk03 = 0x03,
+            Unk04 = 0x04,
+            EmittedPrimitives = 0x10, // Not tested
+            Unk11 = 0x11,
+            Unk12 = 0x12,
+            Unk13 = 0x13,
+            Unk15 = 0x15,
+            Unk16 = 0x16,
+            Unk17 = 0x17,
+            Unk18 = 0x18,
+            Unk1A = 0x1A,
+            Unk1B = 0x1B,
+            Unk1C = 0x1C,
+            Unk1D = 0x1D,
+            Unk1E = 0x1E,
+            GeneratedPrimitives = 0x1F,
+        };
 
-            enum class CullFace : u32 {
-                Front = 0x0404,
-                Back = 0x0405,
-                FrontAndBack = 0x0408,
-            };
+        enum class FrontFace : u32 {
+            ClockWise = 0x0900,
+            CounterClockWise = 0x0901,
+        };
 
-            u32 enabled;
-            FrontFace front_face;
-            CullFace cull_face;
+        enum class CullFace : u32 {
+            Front = 0x0404,
+            Back = 0x0405,
+            FrontAndBack = 0x0408,
         };
 
         struct Blend {
@@ -508,6 +558,23 @@ public:
             FractionalEven = 2,
         };
 
+        enum class PolygonMode : u32 {
+            Point = 0x1b00,
+            Line = 0x1b01,
+            Fill = 0x1b02,
+        };
+
+        enum class ShadowRamControl : u32 {
+            // write value to shadow ram
+            Track = 0,
+            // write value to shadow ram ( with validation ??? )
+            TrackWithFilter = 1,
+            // only write to real hw register
+            Passthrough = 2,
+            // write value from shadow ram to real hw register
+            Replay = 3,
+        };
+
         struct RenderTargetConfig {
             u32 address_high;
             u32 address_low;
@@ -521,7 +588,7 @@ public:
                 BitField<12, 1, InvMemoryLayout> type;
             } memory_layout;
             union {
-                BitField<0, 16, u32> array_mode;
+                BitField<0, 16, u32> layers;
                 BitField<16, 1, u32> volume;
             };
             u32 layer_stride;
@@ -553,7 +620,7 @@ public:
             f32 translate_z;
             INSERT_UNION_PADDING_WORDS(2);
 
-            Common::Rectangle<s32> GetRect() const {
+            Common::Rectangle<f32> GetRect() const {
                 return {
                     GetX(),               // left
                     GetY() + GetHeight(), // top
@@ -562,20 +629,20 @@ public:
                 };
             };
 
-            s32 GetX() const {
-                return static_cast<s32>(std::max(0.0f, translate_x - std::fabs(scale_x)));
+            f32 GetX() const {
+                return std::max(0.0f, translate_x - std::fabs(scale_x));
             }
 
-            s32 GetY() const {
-                return static_cast<s32>(std::max(0.0f, translate_y - std::fabs(scale_y)));
+            f32 GetY() const {
+                return std::max(0.0f, translate_y - std::fabs(scale_y));
             }
 
-            s32 GetWidth() const {
-                return static_cast<s32>(translate_x + std::fabs(scale_x)) - GetX();
+            f32 GetWidth() const {
+                return translate_x + std::fabs(scale_x) - GetX();
             }
 
-            s32 GetHeight() const {
-                return static_cast<s32>(translate_y + std::fabs(scale_y)) - GetY();
+            f32 GetHeight() const {
+                return translate_y + std::fabs(scale_y) - GetY();
             }
         };
 
@@ -605,12 +672,39 @@ public:
             float depth_range_far;
         };
 
+        struct TransformFeedbackBinding {
+            u32 buffer_enable;
+            u32 address_high;
+            u32 address_low;
+            s32 buffer_size;
+            s32 buffer_offset;
+            INSERT_UNION_PADDING_WORDS(3);
+
+            GPUVAddr Address() const {
+                return static_cast<GPUVAddr>((static_cast<GPUVAddr>(address_high) << 32) |
+                                             address_low);
+            }
+        };
+        static_assert(sizeof(TransformFeedbackBinding) == 32);
+
+        struct TransformFeedbackLayout {
+            u32 stream;
+            u32 varying_count;
+            u32 stride;
+            INSERT_UNION_PADDING_WORDS(1);
+        };
+        static_assert(sizeof(TransformFeedbackLayout) == 16);
+
         bool IsShaderConfigEnabled(std::size_t index) const {
             // The VertexB is always enabled.
             if (index == static_cast<std::size_t>(Regs::ShaderProgram::VertexB)) {
                 return true;
             }
             return shader_config[index].enable != 0;
+        }
+
+        bool IsShaderConfigEnabled(Regs::ShaderProgram type) const {
+            return IsShaderConfigEnabled(static_cast<std::size_t>(type));
         }
 
         union {
@@ -624,7 +718,9 @@ public:
                     u32 bind;
                 } macros;
 
-                INSERT_UNION_PADDING_WORDS(0x17);
+                ShadowRamControl shadow_ram_control;
+
+                INSERT_UNION_PADDING_WORDS(0x16);
 
                 Upload::Registers upload;
                 struct {
@@ -661,7 +757,13 @@ public:
 
                 u32 rasterize_enable;
 
-                INSERT_UNION_PADDING_WORDS(0xF1);
+                std::array<TransformFeedbackBinding, NumTransformFeedbackBuffers> tfb_bindings;
+
+                INSERT_UNION_PADDING_WORDS(0xC0);
+
+                std::array<TransformFeedbackLayout, NumTransformFeedbackBuffers> tfb_layouts;
+
+                INSERT_UNION_PADDING_WORDS(0x1);
 
                 u32 tfb_enabled;
 
@@ -689,7 +791,12 @@ public:
 
                 s32 clear_stencil;
 
-                INSERT_UNION_PADDING_WORDS(0x7);
+                INSERT_UNION_PADDING_WORDS(0x2);
+
+                PolygonMode polygon_mode_front;
+                PolygonMode polygon_mode_back;
+
+                INSERT_UNION_PADDING_WORDS(0x3);
 
                 u32 polygon_offset_point_enable;
                 u32 polygon_offset_line_enable;
@@ -704,8 +811,8 @@ public:
                 INSERT_UNION_PADDING_WORDS(0x15);
 
                 s32 stencil_back_func_ref;
-                u32 stencil_back_func_mask;
                 u32 stencil_back_mask;
+                u32 stencil_back_func_mask;
 
                 INSERT_UNION_PADDING_WORDS(0xC);
 
@@ -719,7 +826,13 @@ public:
 
                 u32 rt_separate_frag_data;
 
-                INSERT_UNION_PADDING_WORDS(0xC);
+                INSERT_UNION_PADDING_WORDS(0x1);
+
+                u32 multisample_raster_enable;
+                u32 multisample_raster_samples;
+                std::array<u32, 4> multisample_sample_mask;
+
+                INSERT_UNION_PADDING_WORDS(0x5);
 
                 struct {
                     u32 address_high;
@@ -748,11 +861,24 @@ public:
                     BitField<12, 4, u32> viewport;
                 } clear_flags;
 
-                INSERT_UNION_PADDING_WORDS(0x19);
+                INSERT_UNION_PADDING_WORDS(0x10);
+
+                u32 fill_rectangle;
+
+                INSERT_UNION_PADDING_WORDS(0x8);
 
                 std::array<VertexAttribute, NumVertexAttributes> vertex_attrib_format;
 
-                INSERT_UNION_PADDING_WORDS(0xF);
+                std::array<MsaaSampleLocation, 4> multisample_sample_locations;
+
+                INSERT_UNION_PADDING_WORDS(0x2);
+
+                union {
+                    BitField<0, 1, u32> enable;
+                    BitField<4, 3, u32> target;
+                } multisample_coverage_to_color;
+
+                INSERT_UNION_PADDING_WORDS(0x8);
 
                 struct {
                     union {
@@ -779,8 +905,12 @@ public:
 
                 u32 zeta_width;
                 u32 zeta_height;
+                union {
+                    BitField<0, 16, u32> zeta_layers;
+                    BitField<16, 1, u32> zeta_volume;
+                };
 
-                INSERT_UNION_PADDING_WORDS(0x27);
+                INSERT_UNION_PADDING_WORDS(0x26);
 
                 u32 depth_test_enable;
 
@@ -840,29 +970,31 @@ public:
                     BitField<4, 1, u32> triangle_rast_flip;
                 } screen_y_control;
 
-                INSERT_UNION_PADDING_WORDS(0x21);
+                float line_width_smooth;
+                float line_width_aliased;
+
+                INSERT_UNION_PADDING_WORDS(0x1F);
 
                 u32 vb_element_base;
                 u32 vb_base_instance;
 
                 INSERT_UNION_PADDING_WORDS(0x35);
 
-                union {
-                    BitField<0, 1, u32> c0;
-                    BitField<1, 1, u32> c1;
-                    BitField<2, 1, u32> c2;
-                    BitField<3, 1, u32> c3;
-                    BitField<4, 1, u32> c4;
-                    BitField<5, 1, u32> c5;
-                    BitField<6, 1, u32> c6;
-                    BitField<7, 1, u32> c7;
-                } clip_distance_enabled;
+                u32 clip_distance_enabled;
 
-                INSERT_UNION_PADDING_WORDS(0x1);
+                u32 samplecnt_enable;
 
                 float point_size;
 
-                INSERT_UNION_PADDING_WORDS(0x7);
+                INSERT_UNION_PADDING_WORDS(0x1);
+
+                u32 point_sprite_enable;
+
+                INSERT_UNION_PADDING_WORDS(0x3);
+
+                CounterReset counter_reset;
+
+                u32 multisample_enable;
 
                 u32 zeta_enable;
 
@@ -899,7 +1031,7 @@ public:
 
                 float polygon_offset_factor;
 
-                INSERT_UNION_PADDING_WORDS(0x1);
+                u32 line_smooth_enable;
 
                 struct {
                     u32 tic_address_high;
@@ -926,7 +1058,11 @@ public:
 
                 float polygon_offset_units;
 
-                INSERT_UNION_PADDING_WORDS(0x11);
+                INSERT_UNION_PADDING_WORDS(0x4);
+
+                Tegra::Texture::MsaaMode multisample_mode;
+
+                INSERT_UNION_PADDING_WORDS(0xC);
 
                 union {
                     BitField<2, 1, u32> coord_origin;
@@ -1018,9 +1154,18 @@ public:
                     }
                 } instanced_arrays;
 
-                INSERT_UNION_PADDING_WORDS(0x6);
+                INSERT_UNION_PADDING_WORDS(0x4);
 
-                Cull cull;
+                union {
+                    BitField<0, 1, u32> enable;
+                    BitField<4, 8, u32> unk4;
+                } vp_point_size;
+
+                INSERT_UNION_PADDING_WORDS(1);
+
+                u32 cull_test_enabled;
+                FrontFace front_face;
+                CullFace cull_face;
 
                 u32 pixel_center_integer;
 
@@ -1070,7 +1215,7 @@ public:
                     u32 query_sequence;
                     union {
                         u32 raw;
-                        BitField<0, 2, QueryMode> mode;
+                        BitField<0, 2, QueryOperation> operation;
                         BitField<4, 1, u32> fence;
                         BitField<12, 4, QueryUnit> unit;
                         BitField<16, 1, QuerySyncCondition> sync_cond;
@@ -1159,7 +1304,11 @@ public:
 
                 u32 tex_cb_index;
 
-                INSERT_UNION_PADDING_WORDS(0x395);
+                INSERT_UNION_PADDING_WORDS(0x7D);
+
+                std::array<std::array<u8, 128>, NumTransformFeedbackBuffers> tfb_varying_locs;
+
+                INSERT_UNION_PADDING_WORDS(0x298);
 
                 struct {
                     /// Compressed address of a buffer that holds information about bound SSBOs.
@@ -1182,7 +1331,12 @@ public:
             };
             std::array<u32, NUM_REGS> reg_array;
         };
-    } regs{};
+    };
+
+    Regs regs{};
+
+    /// Store temporary hw register values, used by some calls to restore state after a operation
+    Regs shadow_state;
 
     static_assert(sizeof(Regs) == Regs::NUM_REGS * sizeof(u32), "Maxwell3D Regs has wrong size");
     static_assert(std::is_trivially_copyable_v<Regs>, "Maxwell3D Regs must be trivially copyable");
@@ -1197,81 +1351,6 @@ public:
     };
 
     State state{};
-
-    struct DirtyRegs {
-        static constexpr std::size_t NUM_REGS = 256;
-        static_assert(NUM_REGS - 1 <= std::numeric_limits<u8>::max());
-
-        union {
-            struct {
-                bool null_dirty;
-
-                // Vertex Attributes
-                bool vertex_attrib_format;
-
-                // Vertex Arrays
-                std::array<bool, 32> vertex_array;
-
-                bool vertex_array_buffers;
-
-                // Vertex Instances
-                std::array<bool, 32> vertex_instance;
-
-                bool vertex_instances;
-
-                // Render Targets
-                std::array<bool, 8> render_target;
-                bool depth_buffer;
-
-                bool render_settings;
-
-                // Shaders
-                bool shaders;
-
-                // Rasterizer State
-                bool viewport;
-                bool clip_coefficient;
-                bool cull_mode;
-                bool primitive_restart;
-                bool depth_test;
-                bool stencil_test;
-                bool blend_state;
-                bool scissor_test;
-                bool transform_feedback;
-                bool color_mask;
-                bool polygon_offset;
-                bool depth_bounds_values;
-
-                // Complementary
-                bool viewport_transform;
-                bool screen_y_control;
-
-                bool memory_general;
-            };
-            std::array<bool, NUM_REGS> regs;
-        };
-
-        void ResetVertexArrays() {
-            vertex_array.fill(true);
-            vertex_array_buffers = true;
-        }
-
-        void ResetRenderTargets() {
-            depth_buffer = true;
-            render_target.fill(true);
-            render_settings = true;
-        }
-
-        void OnMemoryWrite() {
-            shaders = true;
-            memory_general = true;
-            ResetRenderTargets();
-            ResetVertexArrays();
-        }
-
-    } dirty{};
-
-    std::array<u8, Regs::NUM_REGS> dirty_pointers{};
 
     /// Reads a register value located at the input method address
     u32 GetRegisterValue(u32 method) const;
@@ -1301,6 +1380,10 @@ public:
         return regs.tex_cb_index;
     }
 
+    VideoCore::GuestDriverProfile& AccessGuestDriverProfile() override;
+
+    const VideoCore::GuestDriverProfile& AccessGuestDriverProfile() const override;
+
     /// Memory for macro code - it's undetermined how big this is, however 1MB is much larger than
     /// we've seen used.
     using MacroMemory = std::array<u32, 0x40000>;
@@ -1312,6 +1395,11 @@ public:
 
     bool ShouldExecute() const {
         return execute_on;
+    }
+
+    /// Notify a memory write has happened.
+    void OnMemoryWrite() {
+        dirty.flags |= dirty.on_write_stores;
     }
 
     enum class MMEDrawMode : u32 {
@@ -1328,6 +1416,16 @@ public:
         bool gl_begin_consume{};
         u32 gl_end_count{};
     } mme_draw;
+
+    struct DirtyState {
+        using Flags = std::bitset<std::numeric_limits<u8>::max()>;
+        using Table = std::array<u8, Regs::NUM_REGS>;
+        using Tables = std::array<Table, 2>;
+
+        Flags flags;
+        Flags on_write_stores;
+        Tables tables{};
+    } dirty;
 
 private:
     void InitializeRegisterDefaults();
@@ -1367,13 +1465,13 @@ private:
 
     bool execute_on{true};
 
+    std::array<u8, Regs::NUM_REGS> dirty_pointers{};
+
     /// Retrieves information about a specific TIC entry from the TIC buffer.
     Texture::TICEntry GetTICEntry(u32 tic_index) const;
 
     /// Retrieves information about a specific TSC entry from the TSC buffer.
     Texture::TSCEntry GetTSCEntry(u32 tsc_index) const;
-
-    void InitDirtySettings();
 
     /**
      * Call a macro on this engine.
@@ -1398,8 +1496,14 @@ private:
     /// Handles a write to the QUERY_GET register.
     void ProcessQueryGet();
 
-    // Handles Conditional Rendering
+    /// Writes the query result accordingly.
+    void StampQueryResult(u64 payload, bool long_query);
+
+    /// Handles conditional rendering.
     void ProcessQueryCondition();
+
+    /// Handles counter resets.
+    void ProcessCounterReset();
 
     /// Handles writes to syncing register.
     void ProcessSyncPoint();
@@ -1417,6 +1521,9 @@ private:
 
     // Handles a instance drawcall from MME
     void StepInstance(MMEDrawMode expected_mode, u32 count);
+
+    /// Returns a query's value or an empty object if the value will be deferred through a cache.
+    std::optional<u64> GetQueryResult();
 };
 
 #define ASSERT_REG_POSITION(field_name, position)                                                  \
@@ -1424,6 +1531,7 @@ private:
                   "Field " #field_name " has invalid position")
 
 ASSERT_REG_POSITION(macros, 0x45);
+ASSERT_REG_POSITION(shadow_ram_control, 0x49);
 ASSERT_REG_POSITION(upload, 0x60);
 ASSERT_REG_POSITION(exec_upload, 0x6C);
 ASSERT_REG_POSITION(data_upload, 0x6D);
@@ -1432,6 +1540,8 @@ ASSERT_REG_POSITION(tess_mode, 0xC8);
 ASSERT_REG_POSITION(tess_level_outer, 0xC9);
 ASSERT_REG_POSITION(tess_level_inner, 0xCD);
 ASSERT_REG_POSITION(rasterize_enable, 0xDF);
+ASSERT_REG_POSITION(tfb_bindings, 0xE0);
+ASSERT_REG_POSITION(tfb_layouts, 0x1C0);
 ASSERT_REG_POSITION(tfb_enabled, 0x1D1);
 ASSERT_REG_POSITION(rt, 0x200);
 ASSERT_REG_POSITION(viewport_transform, 0x280);
@@ -1441,23 +1551,32 @@ ASSERT_REG_POSITION(depth_mode, 0x35F);
 ASSERT_REG_POSITION(clear_color[0], 0x360);
 ASSERT_REG_POSITION(clear_depth, 0x364);
 ASSERT_REG_POSITION(clear_stencil, 0x368);
+ASSERT_REG_POSITION(polygon_mode_front, 0x36B);
+ASSERT_REG_POSITION(polygon_mode_back, 0x36C);
 ASSERT_REG_POSITION(polygon_offset_point_enable, 0x370);
 ASSERT_REG_POSITION(polygon_offset_line_enable, 0x371);
 ASSERT_REG_POSITION(polygon_offset_fill_enable, 0x372);
 ASSERT_REG_POSITION(patch_vertices, 0x373);
 ASSERT_REG_POSITION(scissor_test, 0x380);
 ASSERT_REG_POSITION(stencil_back_func_ref, 0x3D5);
-ASSERT_REG_POSITION(stencil_back_func_mask, 0x3D6);
-ASSERT_REG_POSITION(stencil_back_mask, 0x3D7);
+ASSERT_REG_POSITION(stencil_back_mask, 0x3D6);
+ASSERT_REG_POSITION(stencil_back_func_mask, 0x3D7);
 ASSERT_REG_POSITION(color_mask_common, 0x3E4);
-ASSERT_REG_POSITION(rt_separate_frag_data, 0x3EB);
 ASSERT_REG_POSITION(depth_bounds, 0x3E7);
+ASSERT_REG_POSITION(rt_separate_frag_data, 0x3EB);
+ASSERT_REG_POSITION(multisample_raster_enable, 0x3ED);
+ASSERT_REG_POSITION(multisample_raster_samples, 0x3EE);
+ASSERT_REG_POSITION(multisample_sample_mask, 0x3EF);
 ASSERT_REG_POSITION(zeta, 0x3F8);
 ASSERT_REG_POSITION(clear_flags, 0x43E);
+ASSERT_REG_POSITION(fill_rectangle, 0x44F);
 ASSERT_REG_POSITION(vertex_attrib_format, 0x458);
+ASSERT_REG_POSITION(multisample_sample_locations, 0x478);
+ASSERT_REG_POSITION(multisample_coverage_to_color, 0x47E);
 ASSERT_REG_POSITION(rt_control, 0x487);
 ASSERT_REG_POSITION(zeta_width, 0x48a);
 ASSERT_REG_POSITION(zeta_height, 0x48b);
+ASSERT_REG_POSITION(zeta_layers, 0x48c);
 ASSERT_REG_POSITION(depth_test_enable, 0x4B3);
 ASSERT_REG_POSITION(independent_blend_enable, 0x4B9);
 ASSERT_REG_POSITION(depth_write_enabled, 0x4BA);
@@ -1479,15 +1598,22 @@ ASSERT_REG_POSITION(stencil_front_func_mask, 0x4E6);
 ASSERT_REG_POSITION(stencil_front_mask, 0x4E7);
 ASSERT_REG_POSITION(frag_color_clamp, 0x4EA);
 ASSERT_REG_POSITION(screen_y_control, 0x4EB);
+ASSERT_REG_POSITION(line_width_smooth, 0x4EC);
+ASSERT_REG_POSITION(line_width_aliased, 0x4ED);
 ASSERT_REG_POSITION(vb_element_base, 0x50D);
 ASSERT_REG_POSITION(vb_base_instance, 0x50E);
 ASSERT_REG_POSITION(clip_distance_enabled, 0x544);
+ASSERT_REG_POSITION(samplecnt_enable, 0x545);
 ASSERT_REG_POSITION(point_size, 0x546);
+ASSERT_REG_POSITION(point_sprite_enable, 0x548);
+ASSERT_REG_POSITION(counter_reset, 0x54C);
+ASSERT_REG_POSITION(multisample_enable, 0x54D);
 ASSERT_REG_POSITION(zeta_enable, 0x54E);
 ASSERT_REG_POSITION(multisample_control, 0x54F);
 ASSERT_REG_POSITION(condition, 0x554);
 ASSERT_REG_POSITION(tsc, 0x557);
-ASSERT_REG_POSITION(polygon_offset_factor, 0x55b);
+ASSERT_REG_POSITION(polygon_offset_factor, 0x55B);
+ASSERT_REG_POSITION(line_smooth_enable, 0x55C);
 ASSERT_REG_POSITION(tic, 0x55D);
 ASSERT_REG_POSITION(stencil_two_side_enable, 0x565);
 ASSERT_REG_POSITION(stencil_back_op_fail, 0x566);
@@ -1496,6 +1622,7 @@ ASSERT_REG_POSITION(stencil_back_op_zpass, 0x568);
 ASSERT_REG_POSITION(stencil_back_func_func, 0x569);
 ASSERT_REG_POSITION(framebuffer_srgb, 0x56E);
 ASSERT_REG_POSITION(polygon_offset_units, 0x56F);
+ASSERT_REG_POSITION(multisample_mode, 0x574);
 ASSERT_REG_POSITION(point_coord_replace, 0x581);
 ASSERT_REG_POSITION(code_address, 0x582);
 ASSERT_REG_POSITION(draw, 0x585);
@@ -1503,7 +1630,10 @@ ASSERT_REG_POSITION(primitive_restart, 0x591);
 ASSERT_REG_POSITION(index_array, 0x5F2);
 ASSERT_REG_POSITION(polygon_offset_clamp, 0x61F);
 ASSERT_REG_POSITION(instanced_arrays, 0x620);
-ASSERT_REG_POSITION(cull, 0x646);
+ASSERT_REG_POSITION(vp_point_size, 0x644);
+ASSERT_REG_POSITION(cull_test_enabled, 0x646);
+ASSERT_REG_POSITION(front_face, 0x647);
+ASSERT_REG_POSITION(cull_face, 0x648);
 ASSERT_REG_POSITION(pixel_center_integer, 0x649);
 ASSERT_REG_POSITION(viewport_transform_enabled, 0x64B);
 ASSERT_REG_POSITION(view_volume_clip_control, 0x64F);
@@ -1520,6 +1650,7 @@ ASSERT_REG_POSITION(firmware, 0x8C0);
 ASSERT_REG_POSITION(const_buffer, 0x8E0);
 ASSERT_REG_POSITION(cb_bind[0], 0x904);
 ASSERT_REG_POSITION(tex_cb_index, 0x982);
+ASSERT_REG_POSITION(tfb_varying_locs, 0xA00);
 ASSERT_REG_POSITION(ssbo_info, 0xD18);
 ASSERT_REG_POSITION(tex_info_buffers.address[0], 0xD2A);
 ASSERT_REG_POSITION(tex_info_buffers.size[0], 0xD2F);

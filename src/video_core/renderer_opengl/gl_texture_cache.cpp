@@ -10,7 +10,7 @@
 #include "core/core.h"
 #include "video_core/morton.h"
 #include "video_core/renderer_opengl/gl_resource_manager.h"
-#include "video_core/renderer_opengl/gl_state.h"
+#include "video_core/renderer_opengl/gl_state_tracker.h"
 #include "video_core/renderer_opengl/gl_texture_cache.h"
 #include "video_core/renderer_opengl/utils.h"
 #include "video_core/texture_cache/surface_base.h"
@@ -24,7 +24,6 @@ using Tegra::Texture::SwizzleSource;
 using VideoCore::MortonSwizzleMode;
 
 using VideoCore::Surface::PixelFormat;
-using VideoCore::Surface::SurfaceCompression;
 using VideoCore::Surface::SurfaceTarget;
 using VideoCore::Surface::SurfaceType;
 
@@ -37,100 +36,100 @@ namespace {
 
 struct FormatTuple {
     GLint internal_format;
-    GLenum format;
-    GLenum type;
-    bool compressed;
+    GLenum format = GL_NONE;
+    GLenum type = GL_NONE;
 };
 
 constexpr std::array<FormatTuple, VideoCore::Surface::MaxPixelFormat> tex_format_tuples = {{
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, false},                        // ABGR8U
-    {GL_RGBA8, GL_RGBA, GL_BYTE, false},                                            // ABGR8S
-    {GL_RGBA8UI, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, false},                         // ABGR8UI
-    {GL_RGB565, GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV, false},                        // B5G6R5U
-    {GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, false},                  // A2B10G10R10U
-    {GL_RGB5_A1, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, false},                    // A1B5G5R5U
-    {GL_R8, GL_RED, GL_UNSIGNED_BYTE, false},                                       // R8U
-    {GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE, false},                             // R8UI
-    {GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, false},                                    // RGBA16F
-    {GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT, false},                                 // RGBA16U
-    {GL_RGBA16UI, GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, false},                       // RGBA16UI
-    {GL_R11F_G11F_B10F, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, false},            // R11FG11FB10F
-    {GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT, false},                         // RGBA32UI
-    {GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, true},     // DXT1
-    {GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, true},     // DXT23
-    {GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, true},     // DXT45
-    {GL_COMPRESSED_RED_RGTC1, GL_RED, GL_UNSIGNED_INT_8_8_8_8, true},               // DXN1
-    {GL_COMPRESSED_RG_RGTC2, GL_RG, GL_UNSIGNED_INT_8_8_8_8, true},                 // DXN2UNORM
-    {GL_COMPRESSED_SIGNED_RG_RGTC2, GL_RG, GL_INT, true},                           // DXN2SNORM
-    {GL_COMPRESSED_RGBA_BPTC_UNORM, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, true},        // BC7U
-    {GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT, GL_RGB, GL_UNSIGNED_INT_8_8_8_8, true}, // BC6H_UF16
-    {GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT, GL_RGB, GL_UNSIGNED_INT_8_8_8_8, true},   // BC6H_SF16
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},                                   // ASTC_2D_4X4
-    {GL_RGBA8, GL_BGRA, GL_UNSIGNED_BYTE, false},                                   // BGRA8
-    {GL_RGBA32F, GL_RGBA, GL_FLOAT, false},                                         // RGBA32F
-    {GL_RG32F, GL_RG, GL_FLOAT, false},                                             // RG32F
-    {GL_R32F, GL_RED, GL_FLOAT, false},                                             // R32F
-    {GL_R16F, GL_RED, GL_HALF_FLOAT, false},                                        // R16F
-    {GL_R16, GL_RED, GL_UNSIGNED_SHORT, false},                                     // R16U
-    {GL_R16_SNORM, GL_RED, GL_SHORT, false},                                        // R16S
-    {GL_R16UI, GL_RED_INTEGER, GL_UNSIGNED_SHORT, false},                           // R16UI
-    {GL_R16I, GL_RED_INTEGER, GL_SHORT, false},                                     // R16I
-    {GL_RG16, GL_RG, GL_UNSIGNED_SHORT, false},                                     // RG16
-    {GL_RG16F, GL_RG, GL_HALF_FLOAT, false},                                        // RG16F
-    {GL_RG16UI, GL_RG_INTEGER, GL_UNSIGNED_SHORT, false},                           // RG16UI
-    {GL_RG16I, GL_RG_INTEGER, GL_SHORT, false},                                     // RG16I
-    {GL_RG16_SNORM, GL_RG, GL_SHORT, false},                                        // RG16S
-    {GL_RGB32F, GL_RGB, GL_FLOAT, false},                                           // RGB32F
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, false},                 // RGBA8_SRGB
-    {GL_RG8, GL_RG, GL_UNSIGNED_BYTE, false},                                       // RG8U
-    {GL_RG8, GL_RG, GL_BYTE, false},                                                // RG8S
-    {GL_RG32UI, GL_RG_INTEGER, GL_UNSIGNED_INT, false},                             // RG32UI
-    {GL_RGB16F, GL_RGBA16, GL_HALF_FLOAT, false},                                   // RGBX16F
-    {GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, false},                             // R32UI
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},                                   // ASTC_2D_8X8
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},                                   // ASTC_2D_8X5
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},                                   // ASTC_2D_5X4
-    {GL_SRGB8_ALPHA8, GL_BGRA, GL_UNSIGNED_BYTE, false},                            // BGRA8
+    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV},             // ABGR8U
+    {GL_RGBA8_SNORM, GL_RGBA, GL_BYTE},                           // ABGR8S
+    {GL_RGBA8UI, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE},              // ABGR8UI
+    {GL_RGB565, GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV},             // B5G6R5U
+    {GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV},       // A2B10G10R10U
+    {GL_RGB5_A1, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV},         // A1B5G5R5U
+    {GL_R8, GL_RED, GL_UNSIGNED_BYTE},                            // R8U
+    {GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE},                  // R8UI
+    {GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT},                         // RGBA16F
+    {GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT},                      // RGBA16U
+    {GL_RGBA16_SNORM, GL_RGBA, GL_SHORT},                         // RGBA16S
+    {GL_RGBA16UI, GL_RGBA_INTEGER, GL_UNSIGNED_SHORT},            // RGBA16UI
+    {GL_R11F_G11F_B10F, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV}, // R11FG11FB10F
+    {GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT},              // RGBA32UI
+    {GL_COMPRESSED_RGBA_S3TC_DXT1_EXT},                           // DXT1
+    {GL_COMPRESSED_RGBA_S3TC_DXT3_EXT},                           // DXT23
+    {GL_COMPRESSED_RGBA_S3TC_DXT5_EXT},                           // DXT45
+    {GL_COMPRESSED_RED_RGTC1},                                    // DXN1
+    {GL_COMPRESSED_RG_RGTC2},                                     // DXN2UNORM
+    {GL_COMPRESSED_SIGNED_RG_RGTC2},                              // DXN2SNORM
+    {GL_COMPRESSED_RGBA_BPTC_UNORM},                              // BC7U
+    {GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT},                      // BC6H_UF16
+    {GL_COMPRESSED_RGB_BPTC_SIGNED_FLOAT},                        // BC6H_SF16
+    {GL_COMPRESSED_RGBA_ASTC_4x4_KHR},                            // ASTC_2D_4X4
+    {GL_RGBA8, GL_BGRA, GL_UNSIGNED_BYTE},                        // BGRA8
+    {GL_RGBA32F, GL_RGBA, GL_FLOAT},                              // RGBA32F
+    {GL_RG32F, GL_RG, GL_FLOAT},                                  // RG32F
+    {GL_R32F, GL_RED, GL_FLOAT},                                  // R32F
+    {GL_R16F, GL_RED, GL_HALF_FLOAT},                             // R16F
+    {GL_R16, GL_RED, GL_UNSIGNED_SHORT},                          // R16U
+    {GL_R16_SNORM, GL_RED, GL_SHORT},                             // R16S
+    {GL_R16UI, GL_RED_INTEGER, GL_UNSIGNED_SHORT},                // R16UI
+    {GL_R16I, GL_RED_INTEGER, GL_SHORT},                          // R16I
+    {GL_RG16, GL_RG, GL_UNSIGNED_SHORT},                          // RG16
+    {GL_RG16F, GL_RG, GL_HALF_FLOAT},                             // RG16F
+    {GL_RG16UI, GL_RG_INTEGER, GL_UNSIGNED_SHORT},                // RG16UI
+    {GL_RG16I, GL_RG_INTEGER, GL_SHORT},                          // RG16I
+    {GL_RG16_SNORM, GL_RG, GL_SHORT},                             // RG16S
+    {GL_RGB32F, GL_RGB, GL_FLOAT},                                // RGB32F
+    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV},      // RGBA8_SRGB
+    {GL_RG8, GL_RG, GL_UNSIGNED_BYTE},                            // RG8U
+    {GL_RG8_SNORM, GL_RG, GL_BYTE},                               // RG8S
+    {GL_RG32UI, GL_RG_INTEGER, GL_UNSIGNED_INT},                  // RG32UI
+    {GL_RGB16F, GL_RGBA, GL_HALF_FLOAT},                          // RGBX16F
+    {GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT},                  // R32UI
+    {GL_R32I, GL_RED_INTEGER, GL_INT},                            // R32I
+    {GL_COMPRESSED_RGBA_ASTC_8x8_KHR},                            // ASTC_2D_8X8
+    {GL_COMPRESSED_RGBA_ASTC_8x5_KHR},                            // ASTC_2D_8X5
+    {GL_COMPRESSED_RGBA_ASTC_5x4_KHR},                            // ASTC_2D_5X4
+    {GL_SRGB8_ALPHA8, GL_BGRA, GL_UNSIGNED_BYTE},                 // BGRA8
     // Compressed sRGB formats
-    {GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, true}, // DXT1_SRGB
-    {GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, true}, // DXT23_SRGB
-    {GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, true}, // DXT45_SRGB
-    {GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, true},    // BC7U_SRGB
-    {GL_RGBA4, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4_REV, false},                        // R4G4B4A4U
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_4X4_SRGB
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_8X8_SRGB
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_8X5_SRGB
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_5X4_SRGB
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},             // ASTC_2D_5X5
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_5X5_SRGB
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},             // ASTC_2D_10X8
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_10X8_SRGB
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},             // ASTC_2D_6X6
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_6X6_SRGB
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},             // ASTC_2D_10X10
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_10X10_SRGB
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},             // ASTC_2D_12X12
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_12X12_SRGB
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},             // ASTC_2D_8X6
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_8X6_SRGB
-    {GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, false},             // ASTC_2D_6X5
-    {GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, false},      // ASTC_2D_6X5_SRGB
-    {GL_RGB9_E5, GL_RGB, GL_UNSIGNED_INT_5_9_9_9_REV, false}, // E5B9G9R9F
+    {GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT},           // DXT1_SRGB
+    {GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT},           // DXT23_SRGB
+    {GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT},           // DXT45_SRGB
+    {GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM},              // BC7U_SRGB
+    {GL_RGBA4, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4_REV}, // R4G4B4A4U
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR},          // ASTC_2D_4X4_SRGB
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR},          // ASTC_2D_8X8_SRGB
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR},          // ASTC_2D_8X5_SRGB
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR},          // ASTC_2D_5X4_SRGB
+    {GL_COMPRESSED_RGBA_ASTC_5x5_KHR},                  // ASTC_2D_5X5
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR},          // ASTC_2D_5X5_SRGB
+    {GL_COMPRESSED_RGBA_ASTC_10x8_KHR},                 // ASTC_2D_10X8
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR},         // ASTC_2D_10X8_SRGB
+    {GL_COMPRESSED_RGBA_ASTC_6x6_KHR},                  // ASTC_2D_6X6
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR},          // ASTC_2D_6X6_SRGB
+    {GL_COMPRESSED_RGBA_ASTC_10x10_KHR},                // ASTC_2D_10X10
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR},        // ASTC_2D_10X10_SRGB
+    {GL_COMPRESSED_RGBA_ASTC_12x12_KHR},                // ASTC_2D_12X12
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR},        // ASTC_2D_12X12_SRGB
+    {GL_COMPRESSED_RGBA_ASTC_8x6_KHR},                  // ASTC_2D_8X6
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR},          // ASTC_2D_8X6_SRGB
+    {GL_COMPRESSED_RGBA_ASTC_6x5_KHR},                  // ASTC_2D_6X5
+    {GL_COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR},          // ASTC_2D_6X5_SRGB
+    {GL_RGB9_E5, GL_RGB, GL_UNSIGNED_INT_5_9_9_9_REV},  // E5B9G9R9F
 
     // Depth formats
-    {GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT, false},         // Z32F
-    {GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, false}, // Z16
+    {GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT},         // Z32F
+    {GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT}, // Z16
 
     // DepthStencil formats
-    {GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, false},               // Z24S8
-    {GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, false},               // S8Z24
-    {GL_DEPTH32F_STENCIL8, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, false}, // Z32FS8
+    {GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8},               // Z24S8
+    {GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8},               // S8Z24
+    {GL_DEPTH32F_STENCIL8, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV}, // Z32FS8
 }};
 
 const FormatTuple& GetFormatTuple(PixelFormat pixel_format) {
     ASSERT(static_cast<std::size_t>(pixel_format) < tex_format_tuples.size());
-    const auto& format{tex_format_tuples[static_cast<std::size_t>(pixel_format)]};
-    return format;
+    return tex_format_tuples[static_cast<std::size_t>(pixel_format)];
 }
 
 GLenum GetTextureTarget(const SurfaceTarget& target) {
@@ -176,6 +175,19 @@ GLint GetSwizzleSource(SwizzleSource source) {
     return GL_NONE;
 }
 
+GLenum GetComponent(PixelFormat format, bool is_first) {
+    switch (format) {
+    case PixelFormat::Z24S8:
+    case PixelFormat::Z32FS8:
+        return is_first ? GL_DEPTH_COMPONENT : GL_STENCIL_INDEX;
+    case PixelFormat::S8Z24:
+        return is_first ? GL_STENCIL_INDEX : GL_DEPTH_COMPONENT;
+    default:
+        UNREACHABLE();
+        return GL_DEPTH_COMPONENT;
+    }
+}
+
 void ApplyTextureDefaults(const SurfaceParams& params, GLuint texture) {
     if (params.IsBuffer()) {
         return;
@@ -184,7 +196,7 @@ void ApplyTextureDefaults(const SurfaceParams& params, GLuint texture) {
     glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTextureParameteri(texture, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTextureParameteri(texture, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTextureParameteri(texture, GL_TEXTURE_MAX_LEVEL, params.num_levels - 1);
+    glTextureParameteri(texture, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(params.num_levels - 1));
     if (params.num_levels == 1) {
         glTextureParameterf(texture, GL_TEXTURE_LOD_BIAS, 1000.0f);
     }
@@ -227,13 +239,20 @@ OGLTexture CreateTexture(const SurfaceParams& params, GLenum target, GLenum inte
 
 } // Anonymous namespace
 
-CachedSurface::CachedSurface(const GPUVAddr gpu_addr, const SurfaceParams& params)
-    : VideoCommon::SurfaceBase<View>(gpu_addr, params) {
-    const auto& tuple{GetFormatTuple(params.pixel_format)};
-    internal_format = tuple.internal_format;
-    format = tuple.format;
-    type = tuple.type;
-    is_compressed = tuple.compressed;
+CachedSurface::CachedSurface(const GPUVAddr gpu_addr, const SurfaceParams& params,
+                             bool is_astc_supported)
+    : VideoCommon::SurfaceBase<View>(gpu_addr, params, is_astc_supported) {
+    if (is_converted) {
+        internal_format = params.srgb_conversion ? GL_SRGB8_ALPHA8 : GL_RGBA8;
+        format = GL_RGBA;
+        type = GL_UNSIGNED_BYTE;
+    } else {
+        const auto& tuple{GetFormatTuple(params.pixel_format)};
+        internal_format = tuple.internal_format;
+        format = tuple.format;
+        type = tuple.type;
+        is_compressed = params.IsCompressed();
+    }
     target = GetTextureTarget(params.target);
     texture = CreateTexture(params, target, internal_format, texture_buffer);
     DecorateSurfaceName();
@@ -247,20 +266,26 @@ CachedSurface::~CachedSurface() = default;
 void CachedSurface::DownloadTexture(std::vector<u8>& staging_buffer) {
     MICROPROFILE_SCOPE(OpenGL_Texture_Download);
 
+    if (params.IsBuffer()) {
+        glGetNamedBufferSubData(texture_buffer.handle, 0,
+                                static_cast<GLsizeiptr>(params.GetHostSizeInBytes(false)),
+                                staging_buffer.data());
+        return;
+    }
+
     SCOPE_EXIT({ glPixelStorei(GL_PACK_ROW_LENGTH, 0); });
 
     for (u32 level = 0; level < params.emulated_levels; ++level) {
-        glPixelStorei(GL_PACK_ALIGNMENT, std::min(8U, params.GetRowAlignment(level)));
+        glPixelStorei(GL_PACK_ALIGNMENT, std::min(8U, params.GetRowAlignment(level, is_converted)));
         glPixelStorei(GL_PACK_ROW_LENGTH, static_cast<GLint>(params.GetMipWidth(level)));
-        const std::size_t mip_offset = params.GetHostMipmapLevelOffset(level);
+        const std::size_t mip_offset = params.GetHostMipmapLevelOffset(level, is_converted);
+
+        u8* const mip_data = staging_buffer.data() + mip_offset;
+        const GLsizei size = static_cast<GLsizei>(params.GetHostMipmapSize(level));
         if (is_compressed) {
-            glGetCompressedTextureImage(texture.handle, level,
-                                        static_cast<GLsizei>(params.GetHostMipmapSize(level)),
-                                        staging_buffer.data() + mip_offset);
+            glGetCompressedTextureImage(texture.handle, level, size, mip_data);
         } else {
-            glGetTextureImage(texture.handle, level, format, type,
-                              static_cast<GLsizei>(params.GetHostMipmapSize(level)),
-                              staging_buffer.data() + mip_offset);
+            glGetTextureImage(texture.handle, level, format, type, size, mip_data);
         }
     }
 }
@@ -274,14 +299,10 @@ void CachedSurface::UploadTexture(const std::vector<u8>& staging_buffer) {
 }
 
 void CachedSurface::UploadTextureMipmap(u32 level, const std::vector<u8>& staging_buffer) {
-    glPixelStorei(GL_UNPACK_ALIGNMENT, std::min(8U, params.GetRowAlignment(level)));
+    glPixelStorei(GL_UNPACK_ALIGNMENT, std::min(8U, params.GetRowAlignment(level, is_converted)));
     glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(params.GetMipWidth(level)));
 
-    auto compression_type = params.GetCompressionType();
-
-    const std::size_t mip_offset = compression_type == SurfaceCompression::Converted
-                                       ? params.GetConvertedMipmapOffset(level)
-                                       : params.GetHostMipmapLevelOffset(level);
+    const std::size_t mip_offset = params.GetHostMipmapLevelOffset(level, is_converted);
     const u8* buffer{staging_buffer.data() + mip_offset};
     if (is_compressed) {
         const auto image_size{static_cast<GLsizei>(params.GetHostMipmapSize(level))};
@@ -378,6 +399,7 @@ CachedSurfaceView::CachedSurfaceView(CachedSurface& surface, const ViewParams& p
                                      const bool is_proxy)
     : VideoCommon::ViewBase(params), surface{surface}, is_proxy{is_proxy} {
     target = GetTextureTarget(params.target);
+    format = GetFormatTuple(surface.GetSurfaceParams().pixel_format).internal_format;
     if (!is_proxy) {
         texture_view = CreateTextureView();
     }
@@ -387,24 +409,36 @@ CachedSurfaceView::CachedSurfaceView(CachedSurface& surface, const ViewParams& p
 CachedSurfaceView::~CachedSurfaceView() = default;
 
 void CachedSurfaceView::Attach(GLenum attachment, GLenum target) const {
-    ASSERT(params.num_layers == 1 && params.num_levels == 1);
+    ASSERT(params.num_levels == 1);
 
-    const auto& owner_params = surface.GetSurfaceParams();
+    if (params.num_layers > 1) {
+        // Layered framebuffer attachments
+        UNIMPLEMENTED_IF(params.base_layer != 0);
 
-    switch (owner_params.target) {
+        switch (params.target) {
+        case SurfaceTarget::Texture2DArray:
+            glFramebufferTexture(target, attachment, GetTexture(), 0);
+            break;
+        default:
+            UNIMPLEMENTED();
+        }
+        return;
+    }
+
+    const GLenum view_target = surface.GetTarget();
+    const GLuint texture = surface.GetTexture();
+    switch (surface.GetSurfaceParams().target) {
     case SurfaceTarget::Texture1D:
-        glFramebufferTexture1D(target, attachment, surface.GetTarget(), surface.GetTexture(),
-                               params.base_level);
+        glFramebufferTexture1D(target, attachment, view_target, texture, params.base_level);
         break;
     case SurfaceTarget::Texture2D:
-        glFramebufferTexture2D(target, attachment, surface.GetTarget(), surface.GetTexture(),
-                               params.base_level);
+        glFramebufferTexture2D(target, attachment, view_target, texture, params.base_level);
         break;
     case SurfaceTarget::Texture1DArray:
     case SurfaceTarget::Texture2DArray:
     case SurfaceTarget::TextureCubemap:
     case SurfaceTarget::TextureCubeArray:
-        glFramebufferTextureLayer(target, attachment, surface.GetTexture(), params.base_level,
+        glFramebufferTextureLayer(target, attachment, texture, params.base_level,
                                   params.base_layer);
         break;
     default:
@@ -418,33 +452,38 @@ void CachedSurfaceView::ApplySwizzle(SwizzleSource x_source, SwizzleSource y_sou
     if (new_swizzle == swizzle)
         return;
     swizzle = new_swizzle;
-    const std::array<GLint, 4> gl_swizzle = {GetSwizzleSource(x_source), GetSwizzleSource(y_source),
-                                             GetSwizzleSource(z_source),
-                                             GetSwizzleSource(w_source)};
+    const std::array gl_swizzle = {GetSwizzleSource(x_source), GetSwizzleSource(y_source),
+                                   GetSwizzleSource(z_source), GetSwizzleSource(w_source)};
     const GLuint handle = GetTexture();
-    glTextureParameteriv(handle, GL_TEXTURE_SWIZZLE_RGBA, gl_swizzle.data());
+    const PixelFormat format = surface.GetSurfaceParams().pixel_format;
+    switch (format) {
+    case PixelFormat::Z24S8:
+    case PixelFormat::Z32FS8:
+    case PixelFormat::S8Z24:
+        glTextureParameteri(handle, GL_DEPTH_STENCIL_TEXTURE_MODE,
+                            GetComponent(format, x_source == SwizzleSource::R));
+        break;
+    default:
+        glTextureParameteriv(handle, GL_TEXTURE_SWIZZLE_RGBA, gl_swizzle.data());
+        break;
+    }
 }
 
 OGLTextureView CachedSurfaceView::CreateTextureView() const {
-    const auto& owner_params = surface.GetSurfaceParams();
     OGLTextureView texture_view;
     texture_view.Create();
 
-    const GLuint handle{texture_view.handle};
-    const FormatTuple& tuple{GetFormatTuple(owner_params.pixel_format)};
-
-    glTextureView(handle, target, surface.texture.handle, tuple.internal_format, params.base_level,
+    glTextureView(texture_view.handle, target, surface.texture.handle, format, params.base_level,
                   params.num_levels, params.base_layer, params.num_layers);
-
-    ApplyTextureDefaults(owner_params, handle);
+    ApplyTextureDefaults(surface.GetSurfaceParams(), texture_view.handle);
 
     return texture_view;
 }
 
 TextureCacheOpenGL::TextureCacheOpenGL(Core::System& system,
                                        VideoCore::RasterizerInterface& rasterizer,
-                                       const Device& device)
-    : TextureCacheBase{system, rasterizer} {
+                                       const Device& device, StateTracker& state_tracker)
+    : TextureCacheBase{system, rasterizer, device.HasASTC()}, state_tracker{state_tracker} {
     src_framebuffer.Create();
     dst_framebuffer.Create();
 }
@@ -452,7 +491,7 @@ TextureCacheOpenGL::TextureCacheOpenGL(Core::System& system,
 TextureCacheOpenGL::~TextureCacheOpenGL() = default;
 
 Surface TextureCacheOpenGL::CreateSurface(GPUVAddr gpu_addr, const SurfaceParams& params) {
-    return std::make_shared<CachedSurface>(gpu_addr, params);
+    return std::make_shared<CachedSurface>(gpu_addr, params, is_astc_supported);
 }
 
 void TextureCacheOpenGL::ImageCopy(Surface& src_surface, Surface& dst_surface,
@@ -478,25 +517,26 @@ void TextureCacheOpenGL::ImageBlit(View& src_view, View& dst_view,
                                    const Tegra::Engines::Fermi2D::Config& copy_config) {
     const auto& src_params{src_view->GetSurfaceParams()};
     const auto& dst_params{dst_view->GetSurfaceParams()};
-
-    OpenGLState prev_state{OpenGLState::GetCurState()};
-    SCOPE_EXIT({
-        prev_state.AllDirty();
-        prev_state.Apply();
-    });
-
-    OpenGLState state;
-    state.draw.read_framebuffer = src_framebuffer.handle;
-    state.draw.draw_framebuffer = dst_framebuffer.handle;
-    state.framebuffer_srgb.enabled = dst_params.srgb_conversion;
-    state.AllDirty();
-    state.Apply();
-
-    u32 buffers{};
-
     UNIMPLEMENTED_IF(src_params.target == SurfaceTarget::Texture3D);
     UNIMPLEMENTED_IF(dst_params.target == SurfaceTarget::Texture3D);
 
+    state_tracker.NotifyScissor0();
+    state_tracker.NotifyFramebuffer();
+    state_tracker.NotifyRasterizeEnable();
+    state_tracker.NotifyFramebufferSRGB();
+
+    if (dst_params.srgb_conversion) {
+        glEnable(GL_FRAMEBUFFER_SRGB);
+    } else {
+        glDisable(GL_FRAMEBUFFER_SRGB);
+    }
+    glDisable(GL_RASTERIZER_DISCARD);
+    glDisablei(GL_SCISSOR_TEST, 0);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, src_framebuffer.handle);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst_framebuffer.handle);
+
+    GLenum buffers = 0;
     if (src_params.type == SurfaceType::ColorTexture) {
         src_view->Attach(GL_COLOR_ATTACHMENT0, GL_READ_FRAMEBUFFER);
         glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0,
@@ -531,8 +571,11 @@ void TextureCacheOpenGL::ImageBlit(View& src_view, View& dst_view,
     const Common::Rectangle<u32>& dst_rect = copy_config.dst_rect;
     const bool is_linear = copy_config.filter == Tegra::Engines::Fermi2D::Filter::Linear;
 
-    glBlitFramebuffer(src_rect.left, src_rect.top, src_rect.right, src_rect.bottom, dst_rect.left,
-                      dst_rect.top, dst_rect.right, dst_rect.bottom, buffers,
+    glBlitFramebuffer(static_cast<GLint>(src_rect.left), static_cast<GLint>(src_rect.top),
+                      static_cast<GLint>(src_rect.right), static_cast<GLint>(src_rect.bottom),
+                      static_cast<GLint>(dst_rect.left), static_cast<GLint>(dst_rect.top),
+                      static_cast<GLint>(dst_rect.right), static_cast<GLint>(dst_rect.bottom),
+                      buffers,
                       is_linear && (buffers == GL_COLOR_BUFFER_BIT) ? GL_LINEAR : GL_NEAREST);
 }
 
@@ -554,7 +597,7 @@ void TextureCacheOpenGL::BufferCopy(Surface& src_surface, Surface& dst_surface) 
 
     glBindBuffer(GL_PIXEL_PACK_BUFFER, copy_pbo_handle);
 
-    if (source_format.compressed) {
+    if (src_surface->IsCompressed()) {
         glGetCompressedTextureImage(src_surface->GetTexture(), 0, static_cast<GLsizei>(source_size),
                                     nullptr);
     } else {
@@ -568,7 +611,7 @@ void TextureCacheOpenGL::BufferCopy(Surface& src_surface, Surface& dst_surface) 
     const GLsizei width = static_cast<GLsizei>(dst_params.width);
     const GLsizei height = static_cast<GLsizei>(dst_params.height);
     const GLsizei depth = static_cast<GLsizei>(dst_params.depth);
-    if (dest_format.compressed) {
+    if (dst_surface->IsCompressed()) {
         LOG_CRITICAL(HW_GPU, "Compressed buffer copy is unimplemented!");
         UNREACHABLE();
     } else {

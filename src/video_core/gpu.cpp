@@ -6,6 +6,8 @@
 #include "common/microprofile.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/core_timing_util.h"
+#include "core/frontend/emu_window.h"
 #include "core/memory.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
@@ -15,14 +17,15 @@
 #include "video_core/gpu.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_base.h"
+#include "video_core/video_core.h"
 
 namespace Tegra {
 
 MICROPROFILE_DEFINE(GPU_wait, "GPU", "Wait for the GPU", MP_RGB(128, 128, 192));
 
-GPU::GPU(Core::System& system, VideoCore::RendererBase& renderer, bool is_async)
-    : system{system}, renderer{renderer}, is_async{is_async} {
-    auto& rasterizer{renderer.Rasterizer()};
+GPU::GPU(Core::System& system, std::unique_ptr<VideoCore::RendererBase>&& renderer_, bool is_async)
+    : system{system}, renderer{std::move(renderer_)}, is_async{is_async} {
+    auto& rasterizer{renderer->Rasterizer()};
     memory_manager = std::make_unique<Tegra::MemoryManager>(system, rasterizer);
     dma_pusher = std::make_unique<Tegra::DmaPusher>(*this);
     maxwell_3d = std::make_unique<Engines::Maxwell3D>(system, rasterizer, *memory_manager);
@@ -66,19 +69,20 @@ const DmaPusher& GPU::DmaPusher() const {
     return *dma_pusher;
 }
 
-void GPU::WaitFence(u32 syncpoint_id, u32 value) const {
+void GPU::WaitFence(u32 syncpoint_id, u32 value) {
     // Synced GPU, is always in sync
     if (!is_async) {
         return;
     }
     MICROPROFILE_SCOPE(GPU_wait);
-    while (syncpoints[syncpoint_id].load(std::memory_order_relaxed) < value) {
-    }
+    std::unique_lock lock{sync_mutex};
+    sync_cv.wait(lock, [=]() { return syncpoints[syncpoint_id].load() >= value; });
 }
 
 void GPU::IncrementSyncPoint(const u32 syncpoint_id) {
     syncpoints[syncpoint_id]++;
     std::lock_guard lock{sync_mutex};
+    sync_cv.notify_all();
     if (!syncpt_interrupts[syncpoint_id].empty()) {
         u32 value = syncpoints[syncpoint_id].load();
         auto it = syncpt_interrupts[syncpoint_id].begin();
@@ -121,73 +125,21 @@ bool GPU::CancelSyncptInterrupt(const u32 syncpoint_id, const u32 value) {
     return true;
 }
 
+u64 GPU::GetTicks() const {
+    // This values were reversed engineered by fincs from NVN
+    // The gpu clock is reported in units of 385/625 nanoseconds
+    constexpr u64 gpu_ticks_num = 384;
+    constexpr u64 gpu_ticks_den = 625;
+
+    const u64 cpu_ticks = system.CoreTiming().GetTicks();
+    const u64 nanoseconds = Core::Timing::CyclesToNs(cpu_ticks).count();
+    const u64 nanoseconds_num = nanoseconds / gpu_ticks_den;
+    const u64 nanoseconds_rem = nanoseconds % gpu_ticks_den;
+    return nanoseconds_num * gpu_ticks_num + (nanoseconds_rem * gpu_ticks_num) / gpu_ticks_den;
+}
+
 void GPU::FlushCommands() {
-    renderer.Rasterizer().FlushCommands();
-}
-
-u32 RenderTargetBytesPerPixel(RenderTargetFormat format) {
-    ASSERT(format != RenderTargetFormat::NONE);
-
-    switch (format) {
-    case RenderTargetFormat::RGBA32_FLOAT:
-    case RenderTargetFormat::RGBA32_UINT:
-        return 16;
-    case RenderTargetFormat::RGBA16_UINT:
-    case RenderTargetFormat::RGBA16_UNORM:
-    case RenderTargetFormat::RGBA16_FLOAT:
-    case RenderTargetFormat::RGBX16_FLOAT:
-    case RenderTargetFormat::RG32_FLOAT:
-    case RenderTargetFormat::RG32_UINT:
-        return 8;
-    case RenderTargetFormat::RGBA8_UNORM:
-    case RenderTargetFormat::RGBA8_SNORM:
-    case RenderTargetFormat::RGBA8_SRGB:
-    case RenderTargetFormat::RGBA8_UINT:
-    case RenderTargetFormat::RGB10_A2_UNORM:
-    case RenderTargetFormat::BGRA8_UNORM:
-    case RenderTargetFormat::BGRA8_SRGB:
-    case RenderTargetFormat::RG16_UNORM:
-    case RenderTargetFormat::RG16_SNORM:
-    case RenderTargetFormat::RG16_UINT:
-    case RenderTargetFormat::RG16_SINT:
-    case RenderTargetFormat::RG16_FLOAT:
-    case RenderTargetFormat::R32_FLOAT:
-    case RenderTargetFormat::R11G11B10_FLOAT:
-    case RenderTargetFormat::R32_UINT:
-        return 4;
-    case RenderTargetFormat::R16_UNORM:
-    case RenderTargetFormat::R16_SNORM:
-    case RenderTargetFormat::R16_UINT:
-    case RenderTargetFormat::R16_SINT:
-    case RenderTargetFormat::R16_FLOAT:
-    case RenderTargetFormat::RG8_UNORM:
-    case RenderTargetFormat::RG8_SNORM:
-        return 2;
-    case RenderTargetFormat::R8_UNORM:
-    case RenderTargetFormat::R8_UINT:
-        return 1;
-    default:
-        UNIMPLEMENTED_MSG("Unimplemented render target format {}", static_cast<u32>(format));
-        return 1;
-    }
-}
-
-u32 DepthFormatBytesPerPixel(DepthFormat format) {
-    switch (format) {
-    case DepthFormat::Z32_S8_X24_FLOAT:
-        return 8;
-    case DepthFormat::Z32_FLOAT:
-    case DepthFormat::S8_Z24_UNORM:
-    case DepthFormat::Z24_X8_UNORM:
-    case DepthFormat::Z24_S8_UNORM:
-    case DepthFormat::Z24_C8_UNORM:
-        return 4;
-    case DepthFormat::Z16_UNORM:
-        return 2;
-    default:
-        UNIMPLEMENTED_MSG("Unimplemented Depth format {}", static_cast<u32>(format));
-        return 1;
-    }
+    renderer->Rasterizer().FlushCommands();
 }
 
 // Note that, traditionally, methods are treated as 4-byte addressable locations, and hence
@@ -339,7 +291,7 @@ void GPU::ProcessSemaphoreTriggerMethod() {
         block.sequence = regs.semaphore_sequence;
         // TODO(Kmather73): Generate a real GPU timestamp and write it here instead of
         // CoreTiming
-        block.timestamp = system.CoreTiming().GetTicks();
+        block.timestamp = GetTicks();
         memory_manager->WriteBlock(regs.semaphore_address.SemaphoreAddress(), &block,
                                    sizeof(block));
     } else {

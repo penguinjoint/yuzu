@@ -6,10 +6,12 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "common/common_types.h"
 #include "common/multi_level_queue.h"
+#include "core/hardware_properties.h"
 #include "core/hle/kernel/thread.h"
 
 namespace Core {
@@ -19,13 +21,13 @@ class System;
 
 namespace Kernel {
 
+class KernelCore;
 class Process;
+class SchedulerLock;
 
 class GlobalScheduler final {
 public:
-    static constexpr u32 NUM_CPU_CORES = 4;
-
-    explicit GlobalScheduler(Core::System& system);
+    explicit GlobalScheduler(KernelCore& kernel);
     ~GlobalScheduler();
 
     /// Adds a new thread to the scheduler
@@ -125,7 +127,7 @@ public:
     void PreemptThreads();
 
     u32 CpuCoresCount() const {
-        return NUM_CPU_CORES;
+        return Core::Hardware::NUM_CPU_CORES;
     }
 
     void SetReselectionPending() {
@@ -139,6 +141,14 @@ public:
     void Shutdown();
 
 private:
+    friend class SchedulerLock;
+
+    /// Lock the scheduler to the current thread.
+    void Lock();
+
+    /// Unlocks the scheduler, reselects threads, interrupts cores for rescheduling
+    /// and reschedules current core if needed.
+    void Unlock();
     /**
      * Transfers a thread into an specific core. If the destination_core is -1
      * it will be unscheduled from its source code and added into its suggested
@@ -149,22 +159,29 @@ private:
     bool AskForReselectionOrMarkRedundant(Thread* current_thread, const Thread* winner);
 
     static constexpr u32 min_regular_priority = 2;
-    std::array<Common::MultiLevelQueue<Thread*, THREADPRIO_COUNT>, NUM_CPU_CORES> scheduled_queue;
-    std::array<Common::MultiLevelQueue<Thread*, THREADPRIO_COUNT>, NUM_CPU_CORES> suggested_queue;
+    std::array<Common::MultiLevelQueue<Thread*, THREADPRIO_COUNT>, Core::Hardware::NUM_CPU_CORES>
+        scheduled_queue;
+    std::array<Common::MultiLevelQueue<Thread*, THREADPRIO_COUNT>, Core::Hardware::NUM_CPU_CORES>
+        suggested_queue;
     std::atomic<bool> is_reselection_pending{false};
 
     // The priority levels at which the global scheduler preempts threads every 10 ms. They are
     // ordered from Core 0 to Core 3.
-    std::array<u32, NUM_CPU_CORES> preemption_priorities = {59, 59, 59, 62};
+    std::array<u32, Core::Hardware::NUM_CPU_CORES> preemption_priorities = {59, 59, 59, 62};
+
+    /// Scheduler lock mechanisms.
+    std::mutex inner_lock{}; // TODO(Blinkhawk): Replace for a SpinLock
+    std::atomic<s64> scope_lock{};
+    Core::EmuThreadHandle current_owner{Core::EmuThreadHandle::InvalidHandle()};
 
     /// Lists all thread ids that aren't deleted/etc.
     std::vector<std::shared_ptr<Thread>> thread_list;
-    Core::System& system;
+    KernelCore& kernel;
 };
 
 class Scheduler final {
 public:
-    explicit Scheduler(Core::System& system, Core::ARM_Interface& cpu_core, std::size_t core_id);
+    explicit Scheduler(Core::System& system, std::size_t core_id);
     ~Scheduler();
 
     /// Returns whether there are any threads that are ready to run.
@@ -218,12 +235,37 @@ private:
     std::shared_ptr<Thread> selected_thread = nullptr;
 
     Core::System& system;
-    Core::ARM_Interface& cpu_core;
     u64 last_context_switch_time = 0;
     u64 idle_selection_count = 0;
     const std::size_t core_id;
 
     bool is_context_switch_pending = false;
+};
+
+class SchedulerLock {
+public:
+    explicit SchedulerLock(KernelCore& kernel);
+    ~SchedulerLock();
+
+protected:
+    KernelCore& kernel;
+};
+
+class SchedulerLockAndSleep : public SchedulerLock {
+public:
+    explicit SchedulerLockAndSleep(KernelCore& kernel, Handle& event_handle, Thread* time_task,
+                                   s64 nanoseconds);
+    ~SchedulerLockAndSleep();
+
+    void CancelSleep() {
+        sleep_cancelled = true;
+    }
+
+private:
+    Handle& event_handle;
+    Thread* time_task;
+    s64 nanoseconds;
+    bool sleep_cancelled{};
 };
 
 } // namespace Kernel
